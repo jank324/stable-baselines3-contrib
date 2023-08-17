@@ -1,4 +1,4 @@
-from typing import Any, Callable, ClassVar, Dict, List, Optional, Tuple, Type, TypeVar, Union
+from typing import Any, ClassVar, Dict, List, Optional, Tuple, Type, TypeVar, Union
 
 import numpy as np
 import torch as th
@@ -6,22 +6,23 @@ from gymnasium import spaces
 from stable_baselines3.common.buffers import ReplayBuffer
 from stable_baselines3.common.noise import ActionNoise
 from stable_baselines3.common.off_policy_algorithm import OffPolicyAlgorithm
-from stable_baselines3.common.policies import BasePolicy
-from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback
+from stable_baselines3.common.policies import BasePolicy, ContinuousCritic
+from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback, Schedule
 from stable_baselines3.common.utils import get_parameters_by_name, polyak_update
+from stable_baselines3.td3.policies import Actor, CnnPolicy, MlpPolicy, MultiInputPolicy, TD3Policy
+from torch.nn import functional as F
 
-from sb3_contrib.common.utils import quantile_huber_loss
-from sb3_contrib.mpo.policies import Actor, CnnPolicy, Critic, MlpPolicy, MPOPolicy, MultiInputPolicy
-
-SelfMPO = TypeVar("SelfMPO", bound="MPO")
+SelfTD3 = TypeVar("SelfTD3", bound="TD3")
 
 
-class MPO(OffPolicyAlgorithm):
+class TD3(OffPolicyAlgorithm):
     """
+    Twin Delayed DDPG (TD3)
+    Addressing Function Approximation Error in Actor-Critic Methods.
 
-    Controlling Overestimation Bias with Truncated Mixture of Continuous Distributional Quantile Critics.
-    Paper: https://arxiv.org/abs/2005.04269
-    This implementation uses SB3 SAC implementation as base.
+    Original implementation: https://github.com/sfujim/TD3
+    Paper: https://arxiv.org/abs/1802.09477
+    Introduction to TD3: https://spinningup.openai.com/en/latest/algorithms/td3.html
 
     :param policy: The policy model to use (MlpPolicy, CnnPolicy, ...)
     :param env: The environment to learn from (if registered in Gym, can be str)
@@ -35,7 +36,9 @@ class MPO(OffPolicyAlgorithm):
     :param gamma: the discount factor
     :param train_freq: Update the model every ``train_freq`` steps. Alternatively pass a tuple of frequency and unit
         like ``(5, "step")`` or ``(2, "episode")``.
-    :param gradient_steps: How many gradient update after each step
+    :param gradient_steps: How many gradient steps to do after each rollout (see ``train_freq``)
+        Set to ``-1`` means to do as many gradient steps as steps done in the environment
+        during the rollout.
     :param action_noise: the action noise type (None by default), this can help
         for hard exploration problem. Cf common.noise for the different action noise type.
     :param replay_buffer_class: Replay buffer class to use (for instance ``HerReplayBuffer``).
@@ -44,24 +47,17 @@ class MPO(OffPolicyAlgorithm):
     :param optimize_memory_usage: Enable a memory efficient variant of the replay buffer
         at a cost of more complexity.
         See https://github.com/DLR-RM/stable-baselines3/issues/37#issuecomment-637501195
-    :param ent_coef: Entropy regularization coefficient. (Equivalent to
-        inverse of reward scale in the original SAC paper.)  Controlling exploration/exploitation trade-off.
-        Set it to 'auto' to learn it automatically (and 'auto_0.1' for using 0.1 as initial value)
-    :param target_update_interval: update the target network every ``target_network_update_freq``
-        gradient steps.
-    :param target_entropy: target entropy when learning ``ent_coef`` (``ent_coef = 'auto'``)
-    :param top_quantiles_to_drop_per_net: Number of quantiles to drop per network
-    :param use_sde: Whether to use generalized State Dependent Exploration (gSDE)
-        instead of action noise exploration (default: False)
-    :param sde_sample_freq: Sample a new noise matrix every n steps when using gSDE
-        Default: -1 (only sample at the beginning of the rollout)
-    :param use_sde_at_warmup: Whether to use gSDE instead of uniform sampling
-        during the warm up phase (before learning starts)
+    :param policy_delay: Policy and target networks will only be updated once every policy_delay steps
+        per training steps. The Q values will be updated policy_delay more often (update every training step).
+    :param target_policy_noise: Standard deviation of Gaussian noise added to target policy
+        (smoothing noise)
+    :param target_noise_clip: Limit for absolute value of target policy smoothing noise.
     :param stats_window_size: Window size for the rollout logging, specifying the number of episodes to average
         the reported success rate, mean episode length, and mean reward over
     :param tensorboard_log: the log location for tensorboard (if None, no logging)
     :param policy_kwargs: additional arguments to be passed to the policy on creation
-    :param verbose: the verbosity level: 0 no output, 1 info, 2 debug
+    :param verbose: Verbosity level: 0 for no output, 1 for info messages (such as device or wrappers used), 2 for
+        debug messages
     :param seed: Seed for the pseudo random generators
     :param device: Device (cpu, cuda, ...) on which the code should be run.
         Setting it to auto, the code will be run on the GPU if possible.
@@ -73,34 +69,31 @@ class MPO(OffPolicyAlgorithm):
         "CnnPolicy": CnnPolicy,
         "MultiInputPolicy": MultiInputPolicy,
     }
-    policy: MPOPolicy
+    policy: TD3Policy
     actor: Actor
-    critic: Critic
-    critic_target: Critic
+    actor_target: Actor
+    critic: ContinuousCritic
+    critic_target: ContinuousCritic
 
     def __init__(
         self,
-        policy: Union[str, Type[MPOPolicy]],
+        policy: Union[str, Type[TD3Policy]],
         env: Union[GymEnv, str],
-        learning_rate: Union[float, Callable] = 3e-4,
-        buffer_size: int = 1000000,  # 1e6
+        learning_rate: Union[float, Schedule] = 1e-3,
+        buffer_size: int = 1_000_000,  # 1e6
         learning_starts: int = 100,
-        batch_size: int = 256,
+        batch_size: int = 100,
         tau: float = 0.005,
         gamma: float = 0.99,
-        train_freq: int = 1,
-        gradient_steps: int = 1,
+        train_freq: Union[int, Tuple[int, str]] = (1, "episode"),
+        gradient_steps: int = -1,
         action_noise: Optional[ActionNoise] = None,
         replay_buffer_class: Optional[Type[ReplayBuffer]] = None,
         replay_buffer_kwargs: Optional[Dict[str, Any]] = None,
         optimize_memory_usage: bool = False,
-        ent_coef: Union[str, float] = "auto",
-        target_update_interval: int = 1,
-        target_entropy: Union[str, float] = "auto",
-        top_quantiles_to_drop_per_net: int = 2,
-        use_sde: bool = False,
-        sde_sample_freq: int = -1,
-        use_sde_at_warmup: bool = False,
+        policy_delay: int = 2,
+        target_policy_noise: float = 0.2,
+        target_noise_clip: float = 0.5,
         stats_window_size: int = 100,
         tensorboard_log: Optional[str] = None,
         policy_kwargs: Optional[Dict[str, Any]] = None,
@@ -129,22 +122,15 @@ class MPO(OffPolicyAlgorithm):
             verbose=verbose,
             device=device,
             seed=seed,
-            use_sde=use_sde,
-            sde_sample_freq=sde_sample_freq,
-            use_sde_at_warmup=use_sde_at_warmup,
+            sde_support=False,
             optimize_memory_usage=optimize_memory_usage,
             supported_action_spaces=(spaces.Box,),
             support_multi_env=True,
         )
 
-        self.target_entropy = target_entropy
-        self.log_ent_coef = None  # type: Optional[th.Tensor]
-        # Entropy coefficient / Entropy temperature
-        # Inverse of the reward scale
-        self.ent_coef = ent_coef
-        self.target_update_interval = target_update_interval
-        self.ent_coef_optimizer: Optional[th.optim.Adam] = None
-        self.top_quantiles_to_drop_per_net = top_quantiles_to_drop_per_net
+        self.policy_delay = policy_delay
+        self.target_noise_clip = target_noise_clip
+        self.target_policy_noise = target_policy_noise
 
         if _init_setup_model:
             self._setup_model()
@@ -153,152 +139,85 @@ class MPO(OffPolicyAlgorithm):
         super()._setup_model()
         self._create_aliases()
         # Running mean and running var
-        self.batch_norm_stats = get_parameters_by_name(self.critic, ["running_"])
-        self.batch_norm_stats_target = get_parameters_by_name(self.critic_target, ["running_"])
-
-        # Target entropy is used when learning the entropy coefficient
-        if self.target_entropy == "auto":
-            # automatically set target entropy if needed
-            self.target_entropy = -np.prod(self.env.action_space.shape).astype(np.float32)  # type: ignore
-        else:
-            # Force conversion
-            # this will also throw an error for unexpected string
-            self.target_entropy = float(self.target_entropy)
-
-        # The entropy coefficient or entropy can be learned automatically
-        # see Automating Entropy Adjustment for Maximum Entropy RL section
-        # of https://arxiv.org/abs/1812.05905
-        if isinstance(self.ent_coef, str) and self.ent_coef.startswith("auto"):
-            # Default initial value of ent_coef when learned
-            init_value = 1.0
-            if "_" in self.ent_coef:
-                init_value = float(self.ent_coef.split("_")[1])
-                assert init_value > 0.0, "The initial value of ent_coef must be greater than 0"
-
-            # Note: we optimize the log of the entropy coeff which is slightly different from the paper
-            # as discussed in https://github.com/rail-berkeley/softlearning/issues/37
-            self.log_ent_coef = th.log(th.ones(1, device=self.device) * init_value).requires_grad_(True)
-            self.ent_coef_optimizer = th.optim.Adam([self.log_ent_coef], lr=self.lr_schedule(1))
-        else:
-            # Force conversion to float
-            # this will throw an error if a malformed string (different from 'auto')
-            # is passed
-            self.ent_coef_tensor = th.tensor(float(self.ent_coef), device=self.device)
+        self.actor_batch_norm_stats = get_parameters_by_name(self.actor, ["running_"])
+        self.critic_batch_norm_stats = get_parameters_by_name(self.critic, ["running_"])
+        self.actor_batch_norm_stats_target = get_parameters_by_name(self.actor_target, ["running_"])
+        self.critic_batch_norm_stats_target = get_parameters_by_name(self.critic_target, ["running_"])
 
     def _create_aliases(self) -> None:
         self.actor = self.policy.actor
+        self.actor_target = self.policy.actor_target
         self.critic = self.policy.critic
         self.critic_target = self.policy.critic_target
 
-    def train(self, gradient_steps: int, batch_size: int = 64) -> None:
+    def train(self, gradient_steps: int, batch_size: int = 100) -> None:
         # Switch to train mode (this affects batch norm / dropout)
         self.policy.set_training_mode(True)
-        # Update optimizers learning rate
-        optimizers = [self.actor.optimizer, self.critic.optimizer]
-        if self.ent_coef_optimizer is not None:
-            optimizers += [self.ent_coef_optimizer]
 
         # Update learning rate according to lr schedule
-        self._update_learning_rate(optimizers)
+        self._update_learning_rate([self.actor.optimizer, self.critic.optimizer])
 
-        ent_coef_losses, ent_coefs = [], []
         actor_losses, critic_losses = [], []
-
-        for gradient_step in range(gradient_steps):
+        for _ in range(gradient_steps):
+            self._n_updates += 1
             # Sample replay buffer
             replay_data = self.replay_buffer.sample(batch_size, env=self._vec_normalize_env)  # type: ignore[union-attr]
 
-            # We need to sample because `log_std` may have changed between two gradient steps
-            if self.use_sde:
-                self.actor.reset_noise()
-
-            # Action by the current actor for the sampled state
-            actions_pi, log_prob = self.actor.action_log_prob(replay_data.observations)
-            log_prob = log_prob.reshape(-1, 1)
-
-            ent_coef_loss = None
-            if self.ent_coef_optimizer is not None and self.log_ent_coef is not None:
-                # Important: detach the variable from the graph
-                # so we don't change it with other losses
-                # see https://github.com/rail-berkeley/softlearning/issues/60
-                ent_coef = th.exp(self.log_ent_coef.detach())
-                ent_coef_loss = -(self.log_ent_coef * (log_prob + self.target_entropy).detach()).mean()
-                ent_coef_losses.append(ent_coef_loss.item())
-            else:
-                ent_coef = self.ent_coef_tensor
-
-            ent_coefs.append(ent_coef.item())
-
-            # Optimize entropy coefficient, also called
-            # entropy temperature or alpha in the paper
-            if ent_coef_loss is not None and self.ent_coef_optimizer is not None:
-                self.ent_coef_optimizer.zero_grad()
-                ent_coef_loss.backward()
-                self.ent_coef_optimizer.step()
-
             with th.no_grad():
-                # Select action according to policy
-                next_actions, next_log_prob = self.actor.action_log_prob(replay_data.next_observations)
-                # Compute and cut quantiles at the next state
-                # batch x nets x quantiles
-                next_quantiles = self.critic_target(replay_data.next_observations, next_actions)
+                # Select action according to policy and add clipped noise
+                noise = replay_data.actions.clone().data.normal_(0, self.target_policy_noise)
+                noise = noise.clamp(-self.target_noise_clip, self.target_noise_clip)
+                next_actions = (self.actor_target(replay_data.next_observations) + noise).clamp(-1, 1)
 
-                # Sort and drop top k quantiles to control overestimation.
-                n_target_quantiles = self.critic.quantiles_total - self.top_quantiles_to_drop_per_net * self.critic.n_critics
-                next_quantiles, _ = th.sort(next_quantiles.reshape(batch_size, -1))
-                next_quantiles = next_quantiles[:, :n_target_quantiles]
+                # Compute the next Q-values: min over all critics targets
+                next_q_values = th.cat(self.critic_target(replay_data.next_observations, next_actions), dim=1)
+                next_q_values, _ = th.min(next_q_values, dim=1, keepdim=True)
+                target_q_values = replay_data.rewards + (1 - replay_data.dones) * self.gamma * next_q_values
 
-                # td error + entropy term
-                target_quantiles = next_quantiles - ent_coef * next_log_prob.reshape(-1, 1)
-                target_quantiles = replay_data.rewards + (1 - replay_data.dones) * self.gamma * target_quantiles
-                # Make target_quantiles broadcastable to (batch_size, n_critics, n_target_quantiles).
-                target_quantiles.unsqueeze_(dim=1)
+            # Get current Q-values estimates for each critic network
+            current_q_values = self.critic(replay_data.observations, replay_data.actions)
 
-            # Get current Quantile estimates using action from the replay buffer
-            current_quantiles = self.critic(replay_data.observations, replay_data.actions)
-            # Compute critic loss, not summing over the quantile dimension as in the paper.
-            critic_loss = quantile_huber_loss(current_quantiles, target_quantiles, sum_over_quantiles=False)
+            # Compute critic loss
+            critic_loss = sum(F.mse_loss(current_q, target_q_values) for current_q in current_q_values)
+            assert isinstance(critic_loss, th.Tensor)
             critic_losses.append(critic_loss.item())
 
-            # Optimize the critic
+            # Optimize the critics
             self.critic.optimizer.zero_grad()
             critic_loss.backward()
             self.critic.optimizer.step()
 
-            # Compute actor loss
-            qf_pi = self.critic(replay_data.observations, actions_pi).mean(dim=2).mean(dim=1, keepdim=True)
-            actor_loss = (ent_coef * log_prob - qf_pi).mean()
-            actor_losses.append(actor_loss.item())
+            # Delayed policy updates
+            if self._n_updates % self.policy_delay == 0:
+                # Compute actor loss
+                actor_loss = -self.critic.q1_forward(replay_data.observations, self.actor(replay_data.observations)).mean()
+                actor_losses.append(actor_loss.item())
 
-            # Optimize the actor
-            self.actor.optimizer.zero_grad()
-            actor_loss.backward()
-            self.actor.optimizer.step()
+                # Optimize the actor
+                self.actor.optimizer.zero_grad()
+                actor_loss.backward()
+                self.actor.optimizer.step()
 
-            # Update target networks
-            if gradient_step % self.target_update_interval == 0:
                 polyak_update(self.critic.parameters(), self.critic_target.parameters(), self.tau)
-                # Copy running stats, see https://github.com/DLR-RM/stable-baselines3/issues/996
-                polyak_update(self.batch_norm_stats, self.batch_norm_stats_target, 1.0)
-
-        self._n_updates += gradient_steps
+                polyak_update(self.actor.parameters(), self.actor_target.parameters(), self.tau)
+                # Copy running stats, see GH issue #996
+                polyak_update(self.critic_batch_norm_stats, self.critic_batch_norm_stats_target, 1.0)
+                polyak_update(self.actor_batch_norm_stats, self.actor_batch_norm_stats_target, 1.0)
 
         self.logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
-        self.logger.record("train/ent_coef", np.mean(ent_coefs))
-        self.logger.record("train/actor_loss", np.mean(actor_losses))
+        if len(actor_losses) > 0:
+            self.logger.record("train/actor_loss", np.mean(actor_losses))
         self.logger.record("train/critic_loss", np.mean(critic_losses))
-        if len(ent_coef_losses) > 0:
-            self.logger.record("train/ent_coef_loss", np.mean(ent_coef_losses))
 
     def learn(
-        self: SelfMPO,
+        self: SelfTD3,
         total_timesteps: int,
         callback: MaybeCallback = None,
         log_interval: int = 4,
-        tb_log_name: str = "MPO",
+        tb_log_name: str = "TD3",
         reset_num_timesteps: bool = True,
         progress_bar: bool = False,
-    ) -> SelfMPO:
+    ) -> SelfTD3:
         return super().learn(
             total_timesteps=total_timesteps,
             callback=callback,
@@ -309,14 +228,8 @@ class MPO(OffPolicyAlgorithm):
         )
 
     def _excluded_save_params(self) -> List[str]:
-        # Exclude aliases
-        return super()._excluded_save_params() + ["actor", "critic", "critic_target"]  # noqa: RUF005
+        return super()._excluded_save_params() + ["actor", "critic", "actor_target", "critic_target"]  # noqa: RUF005
 
     def _get_torch_save_params(self) -> Tuple[List[str], List[str]]:
         state_dicts = ["policy", "actor.optimizer", "critic.optimizer"]
-        if self.ent_coef_optimizer is not None:
-            saved_pytorch_variables = ["log_ent_coef"]
-            state_dicts.append("ent_coef_optimizer")
-        else:
-            saved_pytorch_variables = ["ent_coef_tensor"]
-        return state_dicts, saved_pytorch_variables
+        return state_dicts, []

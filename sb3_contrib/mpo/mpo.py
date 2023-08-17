@@ -11,12 +11,12 @@ from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback
 from stable_baselines3.common.utils import get_parameters_by_name, polyak_update
 
 from sb3_contrib.common.utils import quantile_huber_loss
-from sb3_contrib.tqc.policies import Actor, CnnPolicy, Critic, MlpPolicy, MultiInputPolicy, TQCPolicy
+from sb3_contrib.mpo.policies import Actor, CnnPolicy, Critic, MlpPolicy, MPOPolicy, MultiInputPolicy
 
-SelfTQC = TypeVar("SelfTQC", bound="TQC")
+SelfMPO = TypeVar("SelfMPO", bound="MPO")
 
 
-class TQC(OffPolicyAlgorithm):
+class MPO(OffPolicyAlgorithm):
     """
 
     Controlling Overestimation Bias with Truncated Mixture of Continuous Distributional Quantile Critics.
@@ -73,14 +73,14 @@ class TQC(OffPolicyAlgorithm):
         "CnnPolicy": CnnPolicy,
         "MultiInputPolicy": MultiInputPolicy,
     }
-    policy: TQCPolicy
+    policy: MPOPolicy
     actor: Actor
     critic: Critic
     critic_target: Critic
 
     def __init__(
         self,
-        policy: Union[str, Type[TQCPolicy]],
+        policy: Union[str, Type[MPOPolicy]],
         env: Union[GymEnv, str],
         learning_rate: Union[float, Callable] = 3e-4,
         buffer_size: int = 1000000,  # 1e6
@@ -291,14 +291,14 @@ class TQC(OffPolicyAlgorithm):
             self.logger.record("train/ent_coef_loss", np.mean(ent_coef_losses))
 
     def learn(
-        self: SelfTQC,
+        self: SelfMPO,
         total_timesteps: int,
         callback: MaybeCallback = None,
         log_interval: int = 4,
-        tb_log_name: str = "TQC",
+        tb_log_name: str = "MPO",
         reset_num_timesteps: bool = True,
         progress_bar: bool = False,
-    ) -> SelfTQC:
+    ) -> SelfMPO:
         return super().learn(
             total_timesteps=total_timesteps,
             callback=callback,

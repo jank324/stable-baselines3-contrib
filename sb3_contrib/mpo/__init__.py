@@ -1,4 +1,4 @@
-from sb3_contrib.trpo.policies import CnnPolicy, MlpPolicy, MultiInputPolicy
-from sb3_contrib.trpo.trpo import TRPO
+from sb3_contrib.mpo.mpo import MPO
+from sb3_contrib.mpo.policies import CnnPolicy, MlpPolicy, MultiInputPolicy
 
-__all__ = ["CnnPolicy", "MlpPolicy", "MultiInputPolicy", "TRPO"]
+__all__ = ["CnnPolicy", "MlpPolicy", "MultiInputPolicy", "MPO"]

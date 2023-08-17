@@ -1,5 +1,5 @@
 # This file is here just to define MlpPolicy/CnnPolicy
-# that work for TRPO
+# that work for MPO
 from stable_baselines3.common.policies import ActorCriticCnnPolicy, ActorCriticPolicy, MultiInputActorCriticPolicy
 
 MlpPolicy = ActorCriticPolicy

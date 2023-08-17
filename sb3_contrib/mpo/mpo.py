@@ -149,7 +149,7 @@ class TRPO(OnPolicyAlgorithm):
                     f" but because the `RolloutBuffer` is of size `n_steps * n_envs = {buffer_size}`,"
                     f" after every {untruncated_batches} untruncated mini-batches,"
                     f" there will be a truncated mini-batch of size {buffer_size % batch_size}\n"
-                    f"We recommend using a `batch_size` that is a factor of `n_steps * n_envs`.\n"
+                    "We recommend using a `batch_size` that is a factor of `n_steps * n_envs`.\n"
                     f"Info: (n_steps={self.n_steps} and n_envs={self.env.num_envs})"
                 )
         self.batch_size = batch_size

@@ -129,6 +129,8 @@ class MPO(OffPolicyAlgorithm):
             support_multi_env=True,
         )
 
+        # TODO
+
         self.policy_delay = policy_delay
         self.target_noise_clip = target_noise_clip
         self.target_policy_noise = target_policy_noise
@@ -138,6 +140,7 @@ class MPO(OffPolicyAlgorithm):
 
     def _setup_model(self) -> None:
         super()._setup_model()
+        # TODO
         self._create_aliases()
         # Running mean and running var
         self.actor_batch_norm_stats = get_parameters_by_name(self.actor, ["running_"])
@@ -146,12 +149,14 @@ class MPO(OffPolicyAlgorithm):
         self.critic_batch_norm_stats_target = get_parameters_by_name(self.critic_target, ["running_"])
 
     def _create_aliases(self) -> None:
+        # TODO ?
         self.actor = self.policy.actor
         self.actor_target = self.policy.actor_target
         self.critic = self.policy.critic
         self.critic_target = self.policy.critic_target
 
     def train(self, gradient_steps: int, batch_size: int = 100) -> None:
+        # TODO Main todo
         # Switch to train mode (this affects batch norm / dropout)
         self.policy.set_training_mode(True)
 
@@ -229,8 +234,10 @@ class MPO(OffPolicyAlgorithm):
         )
 
     def _excluded_save_params(self) -> List[str]:
+        # TODO ?
         return super()._excluded_save_params() + ["actor", "critic", "actor_target", "critic_target"]  # noqa: RUF005
 
     def _get_torch_save_params(self) -> Tuple[List[str], List[str]]:
+        # TODO ?
         state_dicts = ["policy", "actor.optimizer", "critic.optimizer"]
         return state_dicts, []

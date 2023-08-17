@@ -9,13 +9,14 @@ from stable_baselines3.common.off_policy_algorithm import OffPolicyAlgorithm
 from stable_baselines3.common.policies import BasePolicy, ContinuousCritic
 from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback, Schedule
 from stable_baselines3.common.utils import get_parameters_by_name, polyak_update
-from stable_baselines3.td3.policies import Actor, CnnPolicy, MlpPolicy, MultiInputPolicy, TD3Policy
 from torch.nn import functional as F
 
-SelfTD3 = TypeVar("SelfTD3", bound="TD3")
+from sb3_contrib.mpo.policies import Actor, CnnPolicy, MlpPolicy, MPOPolicy, MultiInputPolicy
+
+SelfMPO = TypeVar("SelfMPO", bound="MPO")
 
 
-class TD3(OffPolicyAlgorithm):
+class MPO(OffPolicyAlgorithm):
     """
     Twin Delayed DDPG (TD3)
     Addressing Function Approximation Error in Actor-Critic Methods.
@@ -69,7 +70,7 @@ class TD3(OffPolicyAlgorithm):
         "CnnPolicy": CnnPolicy,
         "MultiInputPolicy": MultiInputPolicy,
     }
-    policy: TD3Policy
+    policy: MPOPolicy
     actor: Actor
     actor_target: Actor
     critic: ContinuousCritic
@@ -77,7 +78,7 @@ class TD3(OffPolicyAlgorithm):
 
     def __init__(
         self,
-        policy: Union[str, Type[TD3Policy]],
+        policy: Union[str, Type[MPOPolicy]],
         env: Union[GymEnv, str],
         learning_rate: Union[float, Schedule] = 1e-3,
         buffer_size: int = 1_000_000,  # 1e6
@@ -210,14 +211,14 @@ class TD3(OffPolicyAlgorithm):
         self.logger.record("train/critic_loss", np.mean(critic_losses))
 
     def learn(
-        self: SelfTD3,
+        self: SelfMPO,
         total_timesteps: int,
         callback: MaybeCallback = None,
         log_interval: int = 4,
-        tb_log_name: str = "TD3",
+        tb_log_name: str = "MPO",
         reset_num_timesteps: bool = True,
         progress_bar: bool = False,
-    ) -> SelfTD3:
+    ) -> SelfMPO:
         return super().learn(
             total_timesteps=total_timesteps,
             callback=callback,

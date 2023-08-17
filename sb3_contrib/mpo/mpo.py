@@ -15,12 +15,12 @@ from torch import nn
 from torch.nn import functional as F
 
 from sb3_contrib.common.utils import conjugate_gradient_solver, flat_grad
-from sb3_contrib.trpo.policies import CnnPolicy, MlpPolicy, MultiInputPolicy
+from sb3_contrib.mpo.policies import CnnPolicy, MlpPolicy, MultiInputPolicy
 
-SelfTRPO = TypeVar("SelfTRPO", bound="TRPO")
+SelfMPO = TypeVar("SelfMPO", bound="MPO")
 
 
-class TRPO(OnPolicyAlgorithm):
+class MPO(OnPolicyAlgorithm):
     """
     Trust Region Policy Optimization (TRPO)
 
@@ -401,14 +401,14 @@ class TRPO(OnPolicyAlgorithm):
         return flat_grad(jacobian_vector_product, params, retain_graph=retain_graph) + self.cg_damping * vector
 
     def learn(
-        self: SelfTRPO,
+        self: SelfMPO,
         total_timesteps: int,
         callback: MaybeCallback = None,
         log_interval: int = 1,
-        tb_log_name: str = "TRPO",
+        tb_log_name: str = "MPO",
         reset_num_timesteps: bool = True,
         progress_bar: bool = False,
-    ) -> SelfTRPO:
+    ) -> SelfMPO:
         return super().learn(
             total_timesteps=total_timesteps,
             callback=callback,

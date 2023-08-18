@@ -157,6 +157,23 @@ class MPO(OffPolicyAlgorithm):
 
     def train(self, gradient_steps: int, batch_size: int = 100) -> None:
         # TODO Main todo
+        # TODO Somewhere compute evidence lower bound (ELBO), symbol fancy J, Equation (2 in paper)
+        # TODO E-step Improve ELBO w.r.t. q using off-policy deep RL techniques and value-function approximation
+        #      -> optimises J w.r.t. to q
+        #      --> partial maximization of J(q, θ) with respect to q given θ = θi
+        # TODO M-step Update the parametric policy in a supervised learning step using the reweighted state-action samples from
+        #      the E-step as targets
+        #      -> optimises J w.r.t. to pi
+
+        # TODO E-step: sample from replay buffer, compute Q-values, compute ELBO (GitHub Copilot suggestion)
+        # TODO M-step: optimize ELBO w.r.t. policy parameters (GitHub Copilot suggestion)
+
+        # TODO E-step
+        # TODO ---------------------------------------------------------------------
+        # TODO We start by setting q = πθ
+        # TODO Estimate the unregularized action-value function (in practice we estimate Qθ from off-policy data (we refer to
+        #      Section 4 for details about the policy evaluation step))
+
         # Switch to train mode (this affects batch norm / dropout)
         self.policy.set_training_mode(True)
 

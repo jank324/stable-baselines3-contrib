@@ -1,0 +1,11 @@
+{
+  "editor.rulers": [
+    127
+],
+"flake8.args": [
+    "--max-line-length",
+    "127",
+    "--extend-ignore",
+    "E203"
+]
+}

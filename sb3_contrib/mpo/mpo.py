@@ -6,12 +6,11 @@ from gymnasium import spaces
 from stable_baselines3.common.buffers import ReplayBuffer
 from stable_baselines3.common.noise import ActionNoise
 from stable_baselines3.common.off_policy_algorithm import OffPolicyAlgorithm
-from stable_baselines3.common.policies import BasePolicy, ContinuousCritic
+from stable_baselines3.common.policies import ActorCriticCnnPolicy, ActorCriticPolicy, BasePolicy, MultiInputActorCriticPolicy
 from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback, Schedule
-from stable_baselines3.common.utils import get_parameters_by_name, polyak_update
-from torch.nn import functional as F
+from stable_baselines3.common.utils import get_parameters_by_name
 
-from sb3_contrib.mpo.policies import Actor, CnnPolicy, MlpPolicy, MPOPolicy, MultiInputPolicy
+from sb3_contrib.mpo.policies import CnnPolicy, MlpPolicy, MultiInputPolicy
 
 SelfMPO = TypeVar("SelfMPO", bound="MPO")
 
@@ -70,15 +69,10 @@ class MPO(OffPolicyAlgorithm):
         "CnnPolicy": CnnPolicy,
         "MultiInputPolicy": MultiInputPolicy,
     }
-    policy: MPOPolicy
-    actor: Actor
-    actor_target: Actor
-    critic: ContinuousCritic
-    critic_target: ContinuousCritic
 
     def __init__(
         self,
-        policy: Union[str, Type[MPOPolicy]],
+        policy: Union[str, Type[ActorCriticPolicy]],
         env: Union[GymEnv, str],
         learning_rate: Union[float, Schedule] = 1e-3,
         buffer_size: int = 1_000_000,  # 1e6
@@ -140,20 +134,8 @@ class MPO(OffPolicyAlgorithm):
 
     def _setup_model(self) -> None:
         super()._setup_model()
-        # TODO
-        self._create_aliases()
-        # Running mean and running var
-        self.actor_batch_norm_stats = get_parameters_by_name(self.actor, ["running_"])
-        self.critic_batch_norm_stats = get_parameters_by_name(self.critic, ["running_"])
-        self.actor_batch_norm_stats_target = get_parameters_by_name(self.actor_target, ["running_"])
-        self.critic_batch_norm_stats_target = get_parameters_by_name(self.critic_target, ["running_"])
 
-    def _create_aliases(self) -> None:
-        # TODO ?
-        self.actor = self.policy.actor
-        self.actor_target = self.policy.actor_target
-        self.critic = self.policy.critic
-        self.critic_target = self.policy.critic_target
+        # TODO: ?
 
     def train(self, gradient_steps: int, batch_size: int = 100) -> None:
         # TODO Main todo
@@ -162,9 +144,9 @@ class MPO(OffPolicyAlgorithm):
         self.policy.set_training_mode(True)
 
         # Update learning rate according to lr schedule
-        self._update_learning_rate([self.actor.optimizer, self.critic.optimizer])
+        self._update_learning_rate(self.policy.optimizer)
 
-        actor_losses, critic_losses = [], []
+        policy_losses, kl_losses, dual_losses, losses = [], [], [], []
         for _ in range(gradient_steps):  # TODO: Are there multiple gradient steps in Acme? (I think there are higher up)
             self._n_updates += 1
             # Sample replay buffer
@@ -245,58 +227,95 @@ class MPO(OffPolicyAlgorithm):
             # -> Step optimisers (actor optimiser and dual optimiser)
 
             with th.no_grad():
-                # TODO: Get action distribution from policy based on based on "next observation" from replay buffer
-                next_action_distribution = self.actor(replay_data.next_observations)
-                # TODO: Get action distribution from target policy based on based on "next observation" from replay buffer
-                next_action_distribution_target = self.actor_target(replay_data.next_observations)
+                # next_actions, next_action_values, next_log_prob, next_action_distribution = self.policy_target.forward(
+                #     replay_data.next_observations
+                # )
+                next_action_distributions = self.actor_target.get_distribution(replay_data.next_observations)
+                next_action_samples = next_action_distributions.sample(self.num_samples)
 
-                # ----------------------
+                tiled_observations = updaters.tile(observations, self.num_samples)
+                flat_observations = updaters.merge_first_two_dims(tiled_observations)
+                flat_actions = updaters.merge_first_two_dims(actions)
+                values = self.model.target_critic(flat_observations, flat_actions)
+                values = values.view(self.num_samples, -1)
 
-                # Select action according to policy and add clipped noise
-                noise = replay_data.actions.clone().data.normal_(0, self.target_policy_noise)
-                noise = noise.clamp(-self.target_noise_clip, self.target_noise_clip)
-                next_actions = (self.actor_target(replay_data.next_observations) + noise).clamp(-1, 1)
+                assert isinstance(target_distributions, th.distributions.normal.Normal)
+                target_distributions = independent_normals(target_distributions)
 
-                # Compute the next Q-values: min over all critics targets
-                next_q_values = th.cat(self.critic_target(replay_data.next_observations, next_actions), dim=1)
-                next_q_values, _ = th.min(next_q_values, dim=1, keepdim=True)
-                target_q_values = replay_data.rewards + (1 - replay_data.dones) * self.gamma * next_q_values
+            self.actor_optimizer.zero_grad()
+            self.dual_optimizer.zero_grad()
 
-            # Get current Q-values estimates for each critic network
-            current_q_values = self.critic(replay_data.observations, replay_data.actions)
+            distributions = self.model.actor(observations)
+            distributions = independent_normals(distributions)
 
-            # Compute critic loss
-            critic_loss = sum(F.mse_loss(current_q, target_q_values) for current_q in current_q_values)
-            assert isinstance(critic_loss, th.Tensor)
-            critic_losses.append(critic_loss.item())
+            temperature = th.nn.functional.softplus(self.log_temperature) + FLOAT_EPSILON
+            alpha_mean = th.nn.functional.softplus(self.log_alpha_mean) + FLOAT_EPSILON
+            alpha_std = th.nn.functional.softplus(self.log_alpha_std) + FLOAT_EPSILON
+            weights, temperature_loss = weights_and_temperature_loss(values, self.epsilon, temperature)
 
-            # Optimize the critics
-            self.critic.optimizer.zero_grad()
-            critic_loss.backward()
-            self.critic.optimizer.step()
+            # Action penalization is quadratic beyond [-1, 1].
+            if self.action_penalization:
+                penalty_temperature = th.nn.functional.softplus(self.log_penalty_temperature) + FLOAT_EPSILON
+                diff_bounds = actions - th.clamp(actions, -1, 1)
+                action_bound_costs = -th.norm(diff_bounds, dim=-1)
+                penalty_weights, penalty_temperature_loss = weights_and_temperature_loss(
+                    action_bound_costs, self.epsilon_penalty, penalty_temperature
+                )
+                weights += penalty_weights
+                temperature_loss += penalty_temperature_loss
 
-            # Delayed policy updates
-            if self._n_updates % self.policy_delay == 0:
-                # Compute actor loss
-                actor_loss = -self.critic.q1_forward(replay_data.observations, self.actor(replay_data.observations)).mean()
-                actor_losses.append(actor_loss.item())
+            # Decompose the policy into fixed-mean and fixed-std distributions.
+            fixed_std_distribution = independent_normals(distributions.base_dist, target_distributions.base_dist)
+            fixed_mean_distribution = independent_normals(target_distributions.base_dist, distributions.base_dist)
 
-                # Optimize the actor
-                self.actor.optimizer.zero_grad()
-                actor_loss.backward()
-                self.actor.optimizer.step()
+            # Compute the decomposed policy losses.
+            policy_mean_losses = (fixed_std_distribution.base_dist.log_prob(actions).sum(dim=-1) * weights).sum(dim=0)
+            policy_mean_loss = -(policy_mean_losses).mean()
+            policy_std_losses = (fixed_mean_distribution.base_dist.log_prob(actions).sum(dim=-1) * weights).sum(dim=0)
+            policy_std_loss = -policy_std_losses.mean()
 
-                # TODO: Is it Polyak update in Acme or just a copy?
-                polyak_update(self.critic.parameters(), self.critic_target.parameters(), self.tau)
-                polyak_update(self.actor.parameters(), self.actor_target.parameters(), self.tau)
-                # Copy running stats, see GH issue #996
-                polyak_update(self.critic_batch_norm_stats, self.critic_batch_norm_stats_target, 1.0)
-                polyak_update(self.actor_batch_norm_stats, self.actor_batch_norm_stats_target, 1.0)
+            # Compute the decomposed KL between the target and online policies.
+            if self.per_dim_constraining:
+                kl_mean = th.distributions.kl.kl_divergence(target_distributions.base_dist, fixed_std_distribution.base_dist)
+                kl_std = th.distributions.kl.kl_divergence(target_distributions.base_dist, fixed_mean_distribution.base_dist)
+            else:
+                kl_mean = th.distributions.kl.kl_divergence(target_distributions, fixed_std_distribution)
+                kl_std = th.distributions.kl.kl_divergence(target_distributions, fixed_mean_distribution)
+
+            # Compute the alpha-weighted KL-penalty and dual losses.
+            kl_mean_loss, alpha_mean_loss = parametric_kl_and_dual_losses(kl_mean, alpha_mean, self.epsilon_mean)
+            kl_std_loss, alpha_std_loss = parametric_kl_and_dual_losses(kl_std, alpha_std, self.epsilon_std)
+
+            # Combine losses.
+            policy_loss = policy_mean_loss + policy_std_loss
+            kl_loss = kl_mean_loss + kl_std_loss
+            dual_loss = alpha_mean_loss + alpha_std_loss + temperature_loss
+            loss = policy_loss + kl_loss + dual_loss
+
+            loss.backward()
+            if self.gradient_clip > 0:
+                th.nn.utils.clip_grad_norm_(self.actor_variables, self.gradient_clip)
+                th.nn.utils.clip_grad_norm_(self.dual_variables, self.gradient_clip)
+            self.actor_optimizer.step()
+            self.dual_optimizer.step()
+
+            dual_variables = dict(
+                temperature=temperature.detach(), alpha_mean=alpha_mean.detach(), alpha_std=alpha_std.detach()
+            )
+            if self.action_penalization:
+                dual_variables["penalty_temperature"] = penalty_temperature.detach()
+
+            # Save losses
+            policy_losses.append(policy_loss.item())
+            kl_losses.append(kl_loss.item())
+            dual_losses.append(dual_loss.item())
+            losses.append(loss.item())
 
         self.logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
-        if len(actor_losses) > 0:
-            self.logger.record("train/actor_loss", np.mean(actor_losses))
-        self.logger.record("train/critic_loss", np.mean(critic_losses))
+        self.logger.record("train/policy_loss", np.mean(policy_losses))
+        self.logger.record("train/kl_loss", np.mean(kl_losses))
+        self.logger.record("train/dual_loss", np.mean(dual_losses))
+        self.logger.record("train/loss", np.mean(losses))
 
     def learn(
         self: SelfMPO,

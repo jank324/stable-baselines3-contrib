@@ -2,14 +2,20 @@ from typing import Any, Dict, List, Optional, Type, Union
 
 import torch as th
 from gymnasium import spaces
+from stable_baselines3.common.distributions import (
+    BernoulliDistribution,
+    CategoricalDistribution,
+    DiagGaussianDistribution,
+    Distribution,
+    MultiCategoricalDistribution,
+    StateDependentNoiseDistribution,
+)
 from stable_baselines3.common.policies import BasePolicy, ContinuousCritic
-from stable_baselines3.common.preprocessing import get_action_dim
 from stable_baselines3.common.torch_layers import (
     BaseFeaturesExtractor,
     CombinedExtractor,
     FlattenExtractor,
     NatureCNN,
-    create_mlp,
     get_actor_critic_arch,
 )
 from stable_baselines3.common.type_aliases import Schedule
@@ -27,6 +33,7 @@ class Actor(BasePolicy):
         (a CNN when using images, a nn.Flatten() layer otherwise)
     :param features_dim: Number of features
     :param activation_fn: Activation function
+    :param log_std_init: Initial value for the log standard deviation
     :param normalize_images: Whether to normalize images or not,
          dividing by 255.0 (True by default)
     """
@@ -39,6 +46,7 @@ class Actor(BasePolicy):
         features_extractor: nn.Module,
         features_dim: int,
         activation_fn: Type[nn.Module] = nn.ReLU,
+        log_std_init: float = 0.0,
         normalize_images: bool = True,
     ):
         super().__init__(
@@ -52,13 +60,32 @@ class Actor(BasePolicy):
         self.net_arch = net_arch
         self.features_dim = features_dim
         self.activation_fn = activation_fn
+        self.log_std_init = log_std_init
 
-        action_dim = get_action_dim(self.action_space)
-        actor_net = create_mlp(features_dim, action_dim, net_arch, activation_fn, squash_output=True)
-        # Deterministic action
-        self.mu = nn.Sequential(*actor_net)
+        # Create main MLP
+        previous_layer_dim = features_dim
+        mlp_layers = []
+        for current_layer_dim in net_arch:
+            mlp_layers.append(nn.Linear(previous_layer_dim, current_layer_dim))
+            mlp_layers.append(self.activation_fn())
+            previous_layer_dim = current_layer_dim
+        self.mlp = nn.Sequential(*mlp_layers)
+
+        latent_dim = net_arch[-1]
+
+        self.action_dist = self.make_action_dist(action_space)
+
+        if isinstance(self.action_dist, DiagGaussianDistribution):
+            self.action_net, self.log_std = self.action_dist.proba_distribution_net(
+                latent_dim=latent_dim, log_std_init=self.log_std_init
+            )
+        elif isinstance(self.action_dist, (CategoricalDistribution, MultiCategoricalDistribution, BernoulliDistribution)):
+            self.action_net = self.action_dist.proba_distribution_net(latent_dim=latent_dim)
+        else:
+            raise NotImplementedError(f"Unsupported distribution '{self.action_dist}'.")
 
     def _get_constructor_parameters(self) -> Dict[str, Any]:
+        # TODO: Add the new parameters
         data = super()._get_constructor_parameters()
 
         data.update(
@@ -71,18 +98,55 @@ class Actor(BasePolicy):
         )
         return data
 
-    def forward(self, obs: th.Tensor) -> th.Tensor:
-        # assert deterministic, 'The TD3 actor only outputs deterministic actions'
+    def _get_action_dist_from_latent(self, latent: th.Tensor) -> Distribution:
+        """
+        Retrieve action distribution given the latent codes.
+
+        :param latent_pi: Latent code for the actor
+        :return: Action distribution
+        """
+        mean_actions = self.action_net(latent)
+
+        if isinstance(self.action_dist, DiagGaussianDistribution):
+            return self.action_dist.proba_distribution(mean_actions, self.log_std)
+        elif isinstance(self.action_dist, CategoricalDistribution):
+            # Here mean_actions are the logits before the softmax
+            return self.action_dist.proba_distribution(action_logits=mean_actions)
+        elif isinstance(self.action_dist, MultiCategoricalDistribution):
+            # Here mean_actions are the flattened logits
+            return self.action_dist.proba_distribution(action_logits=mean_actions)
+        elif isinstance(self.action_dist, BernoulliDistribution):
+            # Here mean_actions are the logits (before rounding to get the binary actions)
+            return self.action_dist.proba_distribution(action_logits=mean_actions)
+        elif isinstance(self.action_dist, StateDependentNoiseDistribution):
+            return self.action_dist.proba_distribution(mean_actions, self.log_std, latent)
+        else:
+            raise ValueError("Invalid action distribution")
+
+    def predict_action_distritbution(self, obs: th.Tensor) -> Distribution:
+        """
+        Return the distribution for the given observations.
+
+        :param obs:
+        :return: The action distribution
+        """
         features = self.extract_features(obs, self.features_extractor)
-        return self.mu(features)
+        latent = self.mlp(features)
+        distribution = self._get_action_dist_from_latent(latent)
+        return distribution
+
+    def forward(self, obs: th.Tensor, deterministic: bool = False) -> th.Tensor:
+        distribution = self.predict_action_distritbution(obs)
+        actions = distribution.get_actions(deterministic=deterministic)
+        return actions
 
     def _predict(self, observation: th.Tensor, deterministic: bool = False) -> th.Tensor:
         # Note: the deterministic deterministic parameter is ignored in the case of TD3.
         #   Predictions are always deterministic.
-        return self(observation)
+        return self(observation, deterministic=deterministic)
 
 
-class TD3Policy(BasePolicy):
+class MPOPolicy(BasePolicy):
     """
     Policy class (with both actor and critic) for MPO.
 
@@ -122,7 +186,7 @@ class TD3Policy(BasePolicy):
         normalize_images: bool = True,
         optimizer_class: Type[th.optim.Optimizer] = th.optim.Adam,
         optimizer_kwargs: Optional[Dict[str, Any]] = None,
-        n_critics: int = 2,
+        n_critics: int = 2,  # TODO: Figure out how many MPO uses -> I think it's 1
         share_features_extractor: bool = False,
     ):
         super().__init__(
@@ -137,6 +201,7 @@ class TD3Policy(BasePolicy):
         )
 
         # Default network architecture, from the original paper
+        # TODO: Figure out what the default architecture was in the MPO paper
         if net_arch is None:
             if features_extractor_class == NatureCNN:
                 net_arch = [256, 256]
@@ -208,6 +273,7 @@ class TD3Policy(BasePolicy):
 
     def _get_constructor_parameters(self) -> Dict[str, Any]:
         data = super()._get_constructor_parameters()
+        # TODO: Check if theses changed now for MPO
 
         data.update(
             dict(
@@ -253,12 +319,12 @@ class TD3Policy(BasePolicy):
         self.training = mode
 
 
-MlpPolicy = TD3Policy
+MlpPolicy = MPOPolicy
 
 
-class CnnPolicy(TD3Policy):
+class CnnPolicy(MPOPolicy):
     """
-    Policy class (with both actor and critic) for TD3.
+    Policy class (with both actor and critic) for MPO.
 
     :param observation_space: Observation space
     :param action_space: Action space
@@ -291,7 +357,7 @@ class CnnPolicy(TD3Policy):
         normalize_images: bool = True,
         optimizer_class: Type[th.optim.Optimizer] = th.optim.Adam,
         optimizer_kwargs: Optional[Dict[str, Any]] = None,
-        n_critics: int = 2,
+        n_critics: int = 2,  # TODO: Figure out how many MPO uses -> I think it's 1
         share_features_extractor: bool = False,
     ):
         super().__init__(
@@ -310,9 +376,9 @@ class CnnPolicy(TD3Policy):
         )
 
 
-class MultiInputPolicy(TD3Policy):
+class MultiInputPolicy(MPOPolicy):
     """
-    Policy class (with both actor and critic) for TD3 to be used with Dict observation spaces.
+    Policy class (with both actor and critic) for MPO to be used with Dict observation spaces.
 
     :param observation_space: Observation space
     :param action_space: Action space
@@ -345,7 +411,7 @@ class MultiInputPolicy(TD3Policy):
         normalize_images: bool = True,
         optimizer_class: Type[th.optim.Optimizer] = th.optim.Adam,
         optimizer_kwargs: Optional[Dict[str, Any]] = None,
-        n_critics: int = 2,
+        n_critics: int = 2,  # TODO: Figure out how many MPO uses -> I think it's 1
         share_features_extractor: bool = False,
     ):
         super().__init__(

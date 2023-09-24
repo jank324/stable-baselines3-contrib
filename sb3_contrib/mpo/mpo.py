@@ -163,8 +163,32 @@ class MPO(OffPolicyAlgorithm):
         self.dual_optimizer = self.dual_optimizer_class(self.dual_variables, **self.dual_optimizer_kwargs)
 
     def _train_critic(self, replay_data: ReplayBufferSamples) -> Dict[str, th.Tensor]:
-        # TODO: Critic update
-        pass
+        with th.no_grad():
+            next_target_distributions = self.actor_target.predict_action_distribution(
+                replay_data.next_observations
+            ).proba_distribution
+            next_actions = next_target_distributions.sample((self.num_samples,))
+            next_actions = next_actions.reshape(self.num_samples, -1)  # Merge first two dims
+
+            next_observations = replay_data.next_observations.tile(self.num_samples)
+            next_observations = next_observations.reshape(self.num_samples, -1)  # Merge first two dims
+
+            next_values = self.critic_target(next_observations, next_actions)
+            next_values = next_values.reshape(self.num_samples, -1)  # (Un-)? Merge first two dims TODO
+            next_values = next_values.mean(dim=0)
+
+            returns = replay_data.rewards + (1 - replay_data.dones) * self.gamma * next_values
+
+        self.critic.optimizer.zero_grad()
+        values = self.critic(replay_data.observations, replay_data.actions)
+        loss = self.loss(returns, values)  # TODO: Redefine loss as critic loss
+
+        loss.backward()  # TODO loss redefine
+        if self.gradient_clip > 0:
+            th.nn.utils.clip_grad_norm_(self.critic.parameters(), self.gradient_clip)
+        self.critic.optimizer.step()
+
+        return {"critic_loss": loss}
 
     def _train_actor(self, replay_data: ReplayBufferSamples) -> Dict[str, th.Tensor]:
         """

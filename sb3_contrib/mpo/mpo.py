@@ -171,12 +171,12 @@ class MPO(OffPolicyAlgorithm):
 
             tiled_next_observations = replay_data.next_observations.tile(self.num_samples)
 
-            flat_actions = next_action_samples.reshape(self.num_samples, -1)  # Merge first two dims TODO what merge?
+            flat_actions = merge_first_two_dims(next_action_samples)
 
-            flat_next_observations = tiled_next_observations.reshape(self.num_samples, -1)  # Merge first two dims
+            flat_next_observations = merge_first_two_dims(tiled_next_observations)
 
             flat_next_values = self.critic_target.q1_forward(flat_next_observations, flat_actions)
-            next_values = flat_next_values.reshape(self.num_samples, -1)  # (Un-)? Merge first two dims TODO
+            next_values = flat_next_values.view(self.num_samples, -1)
 
             returns = replay_data.rewards + (1 - replay_data.dones) * self.gamma * next_values.mean(dim=0)
 
@@ -202,12 +202,12 @@ class MPO(OffPolicyAlgorithm):
             next_action_samples = target_distributions.sample((self.num_samples,))
 
             tiled_observations = replay_data.observations.tile(self.num_samples)
-            flat_observations = tiled_observations.reshape(self.num_samples, -1)  # Merge first two dims
-            flat_actions = next_action_samples.reshape(self.num_samples, -1)  # Merge first two dims
+            flat_observations = merge_first_two_dims(tiled_observations)
+            flat_actions = merge_first_two_dims(next_action_samples)
             flat_values = self.critic_target.q1_forward(
                 flat_observations, flat_actions
             )  # Use q1_forward because MPO defaults to using only one critic
-            values = flat_values.reshape(self.num_samples, -1)
+            values = flat_values.view(self.num_samples, -1)
 
             target_distributions = Independent(target_distributions, -1)
 
@@ -352,6 +352,16 @@ class MPO(OffPolicyAlgorithm):
         # TODO ?
         state_dicts = ["policy", "actor.optimizer", "critic.optimizer"]
         return state_dicts, []
+
+
+def merge_first_two_dims(original: th.Tensor) -> th.Tensor:
+    """
+    Merges the first two dimensions of a tensor, e.g. a tensor of shape (a, b, c, d) will be reshaped to (a*b, c, d).
+    """
+    merged_dim_size = original.shape[0] * original.shape[1]
+    merged_tensor = original.view(merged_dim_size, -1)
+
+    return merged_tensor
 
 
 def weights_and_temperature_loss(q_values: th.Tensor, epsilon: float, temperature: th.Tensor) -> Tuple[th.Tensor, th.Tensor]:

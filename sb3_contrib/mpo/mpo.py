@@ -93,6 +93,17 @@ class MPO(OffPolicyAlgorithm):
         gradient_steps: int = -1,  # TODO: Tonic batch_iterations=50
         dual_optimizer_class: Type[th.optim.Optimizer] = th.optim.Adam,
         dual_optimizer_kwargs: Optional[Dict[str, Any]] = None,
+        per_dim_constraining: bool = True,
+        initial_log_temperature: float = 1.0,
+        initial_log_alpha_mean: float = 1.0,
+        initial_log_alpha_std: float = 10.0,
+        action_penalization: bool = True,
+        num_samples: int = 20,
+        epsilon: float = 0.1,
+        epsilon_penalty: float = 1e-3,
+        epsilon_mean: float = 1e-3,
+        epsilon_std: float = 1e-6,
+        gradient_clip: float = 0.0,
         replay_buffer_class: Optional[Type[ReplayBuffer]] = None,
         replay_buffer_kwargs: Optional[Dict[str, Any]] = None,
         optimize_memory_usage: bool = False,
@@ -131,7 +142,20 @@ class MPO(OffPolicyAlgorithm):
         )
 
         self.dual_optimizer_class = dual_optimizer_class
-        self.dual_optimizer_kwargs = dual_optimizer_kwargs or {"lr": 1e-2}  # Adam with lr=1e-2 is default in Acme
+        self.dual_optimizer_kwargs = (
+            dual_optimizer_kwargs if dual_optimizer_kwargs is not None else {"lr": 1e-2}
+        )  # Adam with lr=1e-2 is default in Acme
+        self.per_dim_constraining = per_dim_constraining
+        self.initial_log_temperature = initial_log_temperature
+        self.initial_log_alpha_mean = initial_log_alpha_mean
+        self.initial_log_alpha_std = initial_log_alpha_std
+        self.action_penalization = action_penalization
+        self.num_samples = num_samples
+        self.epsilon = epsilon
+        self.epsilon_penalty = epsilon_penalty
+        self.epsilon_mean = epsilon_mean
+        self.epsilon_std = epsilon_std
+        self.gradient_clip = gradient_clip
 
         if _init_setup_model:
             self._setup_model()
@@ -171,7 +195,7 @@ class MPO(OffPolicyAlgorithm):
         self.policy.set_training_mode(True)
 
         # Update learning rate according to lr schedule
-        self._update_learning_rate(self.policy.optimizer)
+        self._update_learning_rate([self.actor.optimizer, self.critic.optimizer, self.dual_optimizer])
 
         critic_losses = []
         policy_losses, kl_losses, dual_losses, actor_losses = [], [], [], []
@@ -187,11 +211,11 @@ class MPO(OffPolicyAlgorithm):
             with th.no_grad():
                 target_distributions = self.actor_target.predict_action_distribution(
                     replay_data.next_observations
-                ).proba_distribution
+                ).distribution
                 next_action_samples = target_distributions.sample((self.num_samples,))
 
-                tiled_observations = replay_data.observations.tile(self.num_samples)
-                tiled_next_observations = replay_data.next_observations.tile(self.num_samples)
+                tiled_observations = replay_data.observations.tile((self.num_samples, 1, 1))
+                tiled_next_observations = replay_data.next_observations.tile((self.num_samples, 1, 1))
 
                 # Flatten sample and batch dimensions for critic evaluations
                 flat_observations = merge_first_two_dims(tiled_observations)
@@ -204,7 +228,7 @@ class MPO(OffPolicyAlgorithm):
 
                 # Restore sample and batch dimensions
                 values = flat_values.view(self.num_samples, -1)
-                next_values = flat_next_values.view(self.num_samples, -1)
+                next_values = flat_next_values.view(self.num_samples, -1, 1)
 
                 target_distributions = Independent(target_distributions, -1)
 
@@ -214,7 +238,7 @@ class MPO(OffPolicyAlgorithm):
             self.dual_optimizer.zero_grad()
             self.critic.optimizer.zero_grad()
 
-            distributions = self.actor.predict_action_distribution(replay_data.observations).proba_distribution
+            distributions = self.actor.predict_action_distribution(replay_data.observations).distribution
             distributions = Independent(distributions, -1)
 
             temperature = F.softplus(self.log_temperature) + FLOAT_EPSILON

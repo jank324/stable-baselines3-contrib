@@ -9,6 +9,7 @@ from stable_baselines3.common.distributions import (
     Distribution,
     MultiCategoricalDistribution,
     StateDependentNoiseDistribution,
+    make_proba_distribution,
 )
 from stable_baselines3.common.policies import BasePolicy, ContinuousCritic
 from stable_baselines3.common.torch_layers import (
@@ -73,7 +74,7 @@ class Actor(BasePolicy):
 
         latent_dim = net_arch[-1]
 
-        self.action_dist = self.make_action_dist(action_space)
+        self.action_dist = make_proba_distribution(action_space)
 
         if isinstance(self.action_dist, DiagGaussianDistribution):
             self.action_net, self.log_std = self.action_dist.proba_distribution_net(
@@ -123,7 +124,7 @@ class Actor(BasePolicy):
         else:
             raise ValueError("Invalid action distribution")
 
-    def predict_action_distritbution(self, obs: th.Tensor) -> Distribution:
+    def predict_action_distribution(self, obs: th.Tensor) -> Distribution:
         """
         Return the distribution for the given observations.
 
@@ -136,7 +137,7 @@ class Actor(BasePolicy):
         return distribution
 
     def forward(self, obs: th.Tensor, deterministic: bool = False) -> th.Tensor:
-        distribution = self.predict_action_distritbution(obs)
+        distribution = self.predict_action_distribution(obs)
         actions = distribution.get_actions(deterministic=deterministic)
         return actions
 

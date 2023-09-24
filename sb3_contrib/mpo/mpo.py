@@ -4,7 +4,6 @@ import numpy as np
 import torch as th
 from gymnasium import spaces
 from stable_baselines3.common.buffers import ReplayBuffer
-from stable_baselines3.common.noise import ActionNoise
 from stable_baselines3.common.off_policy_algorithm import OffPolicyAlgorithm
 from stable_baselines3.common.policies import BasePolicy, ContinuousCritic
 from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback, Schedule
@@ -84,23 +83,19 @@ class MPO(OffPolicyAlgorithm):
         self,
         policy: Union[str, Type[MPOPolicy]],
         env: Union[GymEnv, str],
-        learning_rate: Union[float, Schedule] = 1e-3,
-        buffer_size: int = 1_000_000,  # 1e6
-        learning_starts: int = 100,
+        learning_rate: Union[float, Schedule] = 3e-4,
+        buffer_size: int = 1_000_000,
+        learning_starts: int = 10_000,
         batch_size: int = 100,
         tau: float = 0.005,
         gamma: float = 0.99,
-        train_freq: Union[int, Tuple[int, str]] = (1, "episode"),
-        gradient_steps: int = -1,
-        action_noise: Optional[ActionNoise] = None,
+        train_freq: Union[int, Tuple[int, str]] = (1, "episode"),  # TODO: Tonic step_between_batches=50
+        gradient_steps: int = -1,  # TODO: Tonic batch_iterations=50
         dual_optimizer_class: Type[th.optim.Optimizer] = th.optim.Adam,
         dual_optimizer_kwargs: Optional[Dict[str, Any]] = None,
         replay_buffer_class: Optional[Type[ReplayBuffer]] = None,
         replay_buffer_kwargs: Optional[Dict[str, Any]] = None,
         optimize_memory_usage: bool = False,
-        policy_delay: int = 2,
-        target_policy_noise: float = 0.2,
-        target_noise_clip: float = 0.5,
         stats_window_size: int = 100,
         tensorboard_log: Optional[str] = None,
         policy_kwargs: Optional[Dict[str, Any]] = None,
@@ -120,7 +115,7 @@ class MPO(OffPolicyAlgorithm):
             gamma,
             train_freq,
             gradient_steps,
-            action_noise=action_noise,
+            action_noise=None,
             replay_buffer_class=replay_buffer_class,
             replay_buffer_kwargs=replay_buffer_kwargs,
             policy_kwargs=policy_kwargs,
@@ -135,9 +130,6 @@ class MPO(OffPolicyAlgorithm):
             support_multi_env=True,
         )
 
-        self.policy_delay = policy_delay
-        self.target_noise_clip = target_noise_clip
-        self.target_policy_noise = target_policy_noise
         self.dual_optimizer_class = dual_optimizer_class
         self.dual_optimizer_kwargs = dual_optimizer_kwargs or {"lr": 1e-2}  # Adam with lr=1e-2 is default in Acme
 

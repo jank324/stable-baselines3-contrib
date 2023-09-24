@@ -6,14 +6,14 @@ from gymnasium import spaces
 from stable_baselines3.common.buffers import ReplayBuffer
 from stable_baselines3.common.noise import ActionNoise
 from stable_baselines3.common.off_policy_algorithm import OffPolicyAlgorithm
-from stable_baselines3.common.policies import ActorCriticCnnPolicy, ActorCriticPolicy, BasePolicy, MultiInputActorCriticPolicy
-from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback, ReplayBufferSamples, Schedule
-from stable_baselines3.common.utils import get_parameters_by_name, polyak_update
+from stable_baselines3.common.policies import BasePolicy, ContinuousCritic
+from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback, Schedule
+from stable_baselines3.common.utils import polyak_update
 from torch import nn
 from torch.distributions import Independent, Normal
 from torch.nn import functional as F
 
-from sb3_contrib.mpo.policies import CnnPolicy, MlpPolicy, MultiInputPolicy
+from sb3_contrib.mpo.policies import Actor, CnnPolicy, MlpPolicy, MPOPolicy, MultiInputPolicy
 
 SelfMPO = TypeVar("SelfMPO", bound="MPO")
 
@@ -22,7 +22,7 @@ FLOAT_EPSILON = 1e-8
 
 class MPO(OffPolicyAlgorithm):
     """
-    Twin Delayed DDPG (TD3)
+    Twin Delayed DDPG (TD3) TODO: Update docstring
     Addressing Function Approximation Error in Actor-Critic Methods.
 
     Original implementation: https://github.com/sfujim/TD3
@@ -74,10 +74,15 @@ class MPO(OffPolicyAlgorithm):
         "CnnPolicy": CnnPolicy,
         "MultiInputPolicy": MultiInputPolicy,
     }
+    policy: MPOPolicy
+    actor: Actor
+    actor_target: Actor
+    critic: ContinuousCritic
+    critic_target: ContinuousCritic
 
-    def __init__(
+    def __init__(  # TODO: Copy params from Acme
         self,
-        policy: Union[str, Type[ActorCriticPolicy]],
+        policy: Union[str, Type[MPOPolicy]],
         env: Union[GymEnv, str],
         learning_rate: Union[float, Schedule] = 1e-3,
         buffer_size: int = 1_000_000,  # 1e6
@@ -141,7 +146,15 @@ class MPO(OffPolicyAlgorithm):
 
     def _setup_model(self) -> None:
         super()._setup_model()
+
+        self._create_aliases()
         self._setup_dual_variables_and_optimizer()
+
+    def _create_aliases(self) -> None:
+        self.actor = self.policy.actor
+        self.actor_target = self.policy.actor_target
+        self.critic = self.policy.critic
+        self.critic_target = self.policy.critic_target
 
     def _setup_dual_variables_and_optimizer(self) -> None:
         """
@@ -323,13 +336,23 @@ class MPO(OffPolicyAlgorithm):
         )
 
     def _excluded_save_params(self) -> List[str]:
-        # TODO ?
-        return super()._excluded_save_params() + ["actor", "critic", "actor_target", "critic_target"]  # noqa: RUF005
+        return super()._excluded_save_params() + [
+            "actor",
+            "critic",
+            "actor_target",
+            "critic_target",
+            "dual_variables",
+            "log_temperature",
+            "log_alpha_mean",
+            "log_alpha_std",
+            "log_penalty_temperature",
+            "dual_optimizer",
+        ]  # noqa: RUF005
 
     def _get_torch_save_params(self) -> Tuple[List[str], List[str]]:
-        # TODO ?
-        state_dicts = ["policy", "actor.optimizer", "critic.optimizer"]
-        return state_dicts, []
+        state_dicts = ["policy", "actor.optimizer", "critic.optimizer", "dual_optimizer"]
+        other = ["log_temperature", "log_alpha_mean", "log_alpha_std", "log_penalty_temperature"]
+        return state_dicts, other
 
 
 def merge_first_two_dims(original: th.Tensor) -> th.Tensor:

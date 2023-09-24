@@ -8,7 +8,7 @@ from stable_baselines3.common.noise import ActionNoise
 from stable_baselines3.common.off_policy_algorithm import OffPolicyAlgorithm
 from stable_baselines3.common.policies import ActorCriticCnnPolicy, ActorCriticPolicy, BasePolicy, MultiInputActorCriticPolicy
 from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback, ReplayBufferSamples, Schedule
-from stable_baselines3.common.utils import get_parameters_by_name
+from stable_baselines3.common.utils import get_parameters_by_name, polyak_update
 from torch import nn
 from torch.distributions import Independent, Normal
 from torch.nn import functional as F
@@ -141,7 +141,6 @@ class MPO(OffPolicyAlgorithm):
 
     def _setup_model(self) -> None:
         super()._setup_model()
-        # TODO: This setup as copied from TD3 is a little odd
         self._setup_dual_variables_and_optimizer()
 
     def _setup_dual_variables_and_optimizer(self) -> None:
@@ -274,6 +273,10 @@ class MPO(OffPolicyAlgorithm):
             self.actor.optimizer.step()
             self.dual_optimizer.step()
             self.critic.optimizer.step()
+
+            # Update the target networks
+            polyak_update(self.critic.parameters(), self.critic_target.parameters(), self.tau)
+            polyak_update(self.actor.parameters(), self.actor_target.parameters(), self.tau)
 
             # Save losses for logging
             critic_losses.append(critic_loss.item())

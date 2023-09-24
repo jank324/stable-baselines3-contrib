@@ -164,31 +164,32 @@ class MPO(OffPolicyAlgorithm):
 
     def _train_critic(self, replay_data: ReplayBufferSamples) -> Dict[str, th.Tensor]:
         with th.no_grad():
-            next_target_distributions = self.actor_target.predict_action_distribution(
+            target_distributions = self.actor_target.predict_action_distribution(
                 replay_data.next_observations
             ).proba_distribution
-            next_actions = next_target_distributions.sample((self.num_samples,))
-            next_actions = next_actions.reshape(self.num_samples, -1)  # Merge first two dims
+            next_action_samples = target_distributions.sample((self.num_samples,))
 
-            next_observations = replay_data.next_observations.tile(self.num_samples)
-            next_observations = next_observations.reshape(self.num_samples, -1)  # Merge first two dims
+            tiled_next_observations = replay_data.next_observations.tile(self.num_samples)
 
-            next_values = self.critic_target(next_observations, next_actions)
-            next_values = next_values.reshape(self.num_samples, -1)  # (Un-)? Merge first two dims TODO
-            next_values = next_values.mean(dim=0)
+            flat_actions = next_action_samples.reshape(self.num_samples, -1)  # Merge first two dims TODO what merge?
 
-            returns = replay_data.rewards + (1 - replay_data.dones) * self.gamma * next_values
+            flat_next_observations = tiled_next_observations.reshape(self.num_samples, -1)  # Merge first two dims
+
+            flat_next_values = self.critic_target.q1_forward(flat_next_observations, flat_actions)
+            next_values = flat_next_values.reshape(self.num_samples, -1)  # (Un-)? Merge first two dims TODO
+
+            returns = replay_data.rewards + (1 - replay_data.dones) * self.gamma * next_values.mean(dim=0)
 
         self.critic.optimizer.zero_grad()
-        values = self.critic(replay_data.observations, replay_data.actions)
-        loss = self.loss(returns, values)  # TODO: Redefine loss as critic loss
+        values = self.critic.q1_forward(replay_data.observations, replay_data.actions)
+        critic_loss = F.mse_loss(values, returns)
 
-        loss.backward()  # TODO loss redefine
+        critic_loss.backward()
         if self.gradient_clip > 0:
             th.nn.utils.clip_grad_norm_(self.critic.parameters(), self.gradient_clip)
         self.critic.optimizer.step()
 
-        return {"critic_loss": loss}
+        return {"critic_loss": critic_loss}
 
     def _train_actor(self, replay_data: ReplayBufferSamples) -> Dict[str, th.Tensor]:
         """
@@ -203,10 +204,10 @@ class MPO(OffPolicyAlgorithm):
             tiled_observations = replay_data.observations.tile(self.num_samples)
             flat_observations = tiled_observations.reshape(self.num_samples, -1)  # Merge first two dims
             flat_actions = next_action_samples.reshape(self.num_samples, -1)  # Merge first two dims
-            values = self.critic_target.q1_forward(
+            flat_values = self.critic_target.q1_forward(
                 flat_observations, flat_actions
             )  # Use q1_forward because MPO defaults to using only one critic
-            values = values.reshape(self.num_samples, -1)
+            values = flat_values.reshape(self.num_samples, -1)
 
             target_distributions = Independent(target_distributions, -1)
 

@@ -85,7 +85,6 @@ class Actor(BasePolicy):
             raise NotImplementedError(f"Unsupported distribution '{self.action_dist}'.")
 
     def _get_constructor_parameters(self) -> Dict[str, Any]:
-        # TODO: Add the new parameters
         data = super()._get_constructor_parameters()
 
         data.update(
@@ -94,6 +93,7 @@ class Actor(BasePolicy):
                 features_dim=self.features_dim,
                 activation_fn=self.activation_fn,
                 features_extractor=self.features_extractor,
+                log_std_init=self.log_std_init,
             )
         )
         return data
@@ -186,7 +186,7 @@ class MPOPolicy(BasePolicy):
         normalize_images: bool = True,
         optimizer_class: Type[th.optim.Optimizer] = th.optim.Adam,
         optimizer_kwargs: Optional[Dict[str, Any]] = None,
-        n_critics: int = 1,  # TODO: Figure out how many MPO uses -> I think it's 1
+        n_critics: int = 1,
         share_features_extractor: bool = False,
     ):
         super().__init__(
@@ -201,7 +201,6 @@ class MPOPolicy(BasePolicy):
         )
 
         # Default network architecture, from the original paper
-        # TODO: Figure out what the default architecture was in the MPO paper
         if net_arch is None:
             if features_extractor_class == NatureCNN:
                 net_arch = [256, 256]
@@ -273,7 +272,6 @@ class MPOPolicy(BasePolicy):
 
     def _get_constructor_parameters(self) -> Dict[str, Any]:
         data = super()._get_constructor_parameters()
-        # TODO: Check if theses changed now for MPO
 
         data.update(
             dict(
@@ -357,7 +355,7 @@ class CnnPolicy(MPOPolicy):
         normalize_images: bool = True,
         optimizer_class: Type[th.optim.Optimizer] = th.optim.Adam,
         optimizer_kwargs: Optional[Dict[str, Any]] = None,
-        n_critics: int = 1,  # TODO: Figure out how many MPO uses -> I think it's 1
+        n_critics: int = 1,
         share_features_extractor: bool = False,
     ):
         super().__init__(
@@ -411,7 +409,7 @@ class MultiInputPolicy(MPOPolicy):
         normalize_images: bool = True,
         optimizer_class: Type[th.optim.Optimizer] = th.optim.Adam,
         optimizer_kwargs: Optional[Dict[str, Any]] = None,
-        n_critics: int = 1,  # TODO: Figure out how many MPO uses -> I think it's 1
+        n_critics: int = 1,
         share_features_extractor: bool = False,
     ):
         super().__init__(

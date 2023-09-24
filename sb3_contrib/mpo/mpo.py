@@ -162,126 +162,6 @@ class MPO(OffPolicyAlgorithm):
 
         self.dual_optimizer = self.dual_optimizer_class(self.dual_variables, **self.dual_optimizer_kwargs)
 
-    def _train_critic(self, replay_data: ReplayBufferSamples) -> Dict[str, th.Tensor]:
-        with th.no_grad():
-            target_distributions = self.actor_target.predict_action_distribution(
-                replay_data.next_observations
-            ).proba_distribution
-            next_action_samples = target_distributions.sample((self.num_samples,))
-
-            tiled_next_observations = replay_data.next_observations.tile(self.num_samples)
-
-            flat_actions = merge_first_two_dims(next_action_samples)
-
-            flat_next_observations = merge_first_two_dims(tiled_next_observations)
-
-            flat_next_values = self.critic_target.q1_forward(flat_next_observations, flat_actions)
-            next_values = flat_next_values.view(self.num_samples, -1)
-
-            returns = replay_data.rewards + (1 - replay_data.dones) * self.gamma * next_values.mean(dim=0)
-
-        self.critic.optimizer.zero_grad()
-        values = self.critic.q1_forward(replay_data.observations, replay_data.actions)
-        critic_loss = F.mse_loss(values, returns)
-
-        critic_loss.backward()
-        if self.gradient_clip > 0:
-            th.nn.utils.clip_grad_norm_(self.critic.parameters(), self.gradient_clip)
-        self.critic.optimizer.step()
-
-        return {"critic_loss": critic_loss}
-
-    def _train_actor(self, replay_data: ReplayBufferSamples) -> Dict[str, th.Tensor]:
-        """
-        Train the actor network and update the temperature and dual variables on the sampled data.
-        """
-        with th.no_grad():
-            target_distributions = self.actor_target.predict_action_distribution(
-                replay_data.next_observations
-            ).proba_distribution
-            next_action_samples = target_distributions.sample((self.num_samples,))
-
-            tiled_observations = replay_data.observations.tile(self.num_samples)
-            flat_observations = merge_first_two_dims(tiled_observations)
-            flat_actions = merge_first_two_dims(next_action_samples)
-            flat_values = self.critic_target.q1_forward(
-                flat_observations, flat_actions
-            )  # Use q1_forward because MPO defaults to using only one critic
-            values = flat_values.view(self.num_samples, -1)
-
-            target_distributions = Independent(target_distributions, -1)
-
-        self.actor.optimizer.zero_grad()
-        self.dual_optimizer.zero_grad()
-
-        distributions = self.actor.predict_action_distribution(replay_data.observations).proba_distribution
-        distributions = Independent(distributions, -1)
-
-        temperature = F.softplus(self.log_temperature) + FLOAT_EPSILON
-        alpha_mean = F.softplus(self.log_alpha_mean) + FLOAT_EPSILON
-        alpha_std = F.softplus(self.log_alpha_std) + FLOAT_EPSILON
-        weights, temperature_loss = weights_and_temperature_loss(values, self.epsilon, temperature)
-
-        # Action penalization is quadratic beyond [-1, 1].
-        if self.action_penalization:
-            penalty_temperature = F.softplus(self.log_penalty_temperature) + FLOAT_EPSILON
-            diff_bounds = next_action_samples - th.clamp(next_action_samples, -1, 1)
-            action_bound_costs = -th.norm(diff_bounds, dim=-1)
-            penalty_weights, penalty_temperature_loss = weights_and_temperature_loss(
-                action_bound_costs, self.epsilon_penalty, penalty_temperature
-            )
-            weights += penalty_weights
-            temperature_loss += penalty_temperature_loss
-
-        # Decompose the policy into fixed-mean and fixed-std distributions
-        fixed_std_distribution = Independent(Normal(distributions.mean, target_distributions.stddev), -1)
-        fixed_mean_distribution = Independent(Normal(target_distributions.mean, distributions.stddev), -1)
-
-        # Compute the decomposed policy losses.
-        policy_mean_losses = (fixed_std_distribution.base_dist.log_prob(next_action_samples).sum(dim=-1) * weights).sum(dim=0)
-        policy_mean_loss = -(policy_mean_losses).mean()
-        policy_std_losses = (fixed_mean_distribution.base_dist.log_prob(next_action_samples).sum(dim=-1) * weights).sum(dim=0)
-        policy_std_loss = -policy_std_losses.mean()
-
-        # Compute the decomposed KL between the target and online policies.
-        if self.per_dim_constraining:
-            kl_mean = th.distributions.kl.kl_divergence(target_distributions.base_dist, fixed_std_distribution.base_dist)
-            kl_std = th.distributions.kl.kl_divergence(target_distributions.base_dist, fixed_mean_distribution.base_dist)
-        else:
-            kl_mean = th.distributions.kl.kl_divergence(target_distributions, fixed_std_distribution)
-            kl_std = th.distributions.kl.kl_divergence(target_distributions, fixed_mean_distribution)
-
-        # Compute the alpha-weighted KL-penalty and dual losses.
-        kl_mean_loss, alpha_mean_loss = parametric_kl_and_dual_losses(kl_mean, alpha_mean, self.epsilon_mean)
-        kl_std_loss, alpha_std_loss = parametric_kl_and_dual_losses(kl_std, alpha_std, self.epsilon_std)
-
-        # Combine losses.
-        policy_loss = policy_mean_loss + policy_std_loss
-        kl_loss = kl_mean_loss + kl_std_loss
-        dual_loss = alpha_mean_loss + alpha_std_loss + temperature_loss
-        loss = policy_loss + kl_loss + dual_loss
-
-        loss.backward()
-        if self.gradient_clip > 0:
-            th.nn.utils.clip_grad_norm_(self.actor.parameters(), self.gradient_clip)
-            th.nn.utils.clip_grad_norm_(self.dual_variables, self.gradient_clip)
-        self.actor.optimizer.step()
-        self.dual_optimizer.step()
-
-        log_dict = {
-            "policy_loss": policy_loss.item(),
-            "kl_loss": kl_loss.item(),
-            "dual_loss": dual_loss.item(),
-            "loss": loss.item(),
-            "temperature": temperature.mean().item(),
-            "alpha_mean": alpha_mean.mean().item(),
-            "alpha_std": alpha_std.mean().item(),
-        }
-        if self.action_penalization:
-            log_dict["penalty_temperature"] = penalty_temperature.mean().item()
-
-        return log_dict
-
     def train(self, gradient_steps: int, batch_size: int = 100) -> None:
         # Switch to train mode (this affects batch norm / dropout)
         self.policy.set_training_mode(True)
@@ -300,26 +180,121 @@ class MPO(OffPolicyAlgorithm):
             # Sample replay buffer
             replay_data = self.replay_buffer.sample(batch_size, env=self._vec_normalize_env)  # type: ignore[union-attr]
 
-            critic_log_dict = self._train_critic(replay_data)
-            actor_log_dict = self._train_actor(replay_data)
+            with th.no_grad():
+                target_distributions = self.actor_target.predict_action_distribution(
+                    replay_data.next_observations
+                ).proba_distribution
+                next_action_samples = target_distributions.sample((self.num_samples,))
 
-            critic_losses.append(critic_log_dict["loss"])
-            policy_losses.append(actor_log_dict["policy_loss"])
-            kl_losses.append(actor_log_dict["kl_loss"])
-            dual_losses.append(actor_log_dict["dual_loss"])
-            actor_losses.append(actor_log_dict["loss"])
-            logged_temperatures.append(actor_log_dict["temperature"])
-            logged_alpha_means.append(actor_log_dict["alpha_mean"])
-            logged_alpha_stds.append(actor_log_dict["alpha_std"])
+                tiled_observations = replay_data.observations.tile(self.num_samples)
+                tiled_next_observations = replay_data.next_observations.tile(self.num_samples)
+
+                # Flatten sample and batch dimensions for critic evaluations
+                flat_observations = merge_first_two_dims(tiled_observations)
+                flat_next_observations = merge_first_two_dims(tiled_next_observations)
+                flat_actions = merge_first_two_dims(next_action_samples)
+
+                # Use q1_forward because MPO defaults to using only one critic
+                flat_values = self.critic_target.q1_forward(flat_observations, flat_actions)
+                flat_next_values = self.critic_target.q1_forward(flat_next_observations, flat_actions)
+
+                # Restore sample and batch dimensions
+                values = flat_values.view(self.num_samples, -1)
+                next_values = flat_next_values.view(self.num_samples, -1)
+
+                target_distributions = Independent(target_distributions, -1)
+
+                returns = replay_data.rewards + (1 - replay_data.dones) * self.gamma * next_values.mean(dim=0)
+
+            self.actor.optimizer.zero_grad()
+            self.dual_optimizer.zero_grad()
+            self.critic.optimizer.zero_grad()
+
+            distributions = self.actor.predict_action_distribution(replay_data.observations).proba_distribution
+            distributions = Independent(distributions, -1)
+
+            temperature = F.softplus(self.log_temperature) + FLOAT_EPSILON
+            alpha_mean = F.softplus(self.log_alpha_mean) + FLOAT_EPSILON
+            alpha_std = F.softplus(self.log_alpha_std) + FLOAT_EPSILON
+            weights, temperature_loss = weights_and_temperature_loss(values, self.epsilon, temperature)
+
+            # Action penalization is quadratic beyond [-1, 1].
             if self.action_penalization:
-                logged_penalties.append(actor_log_dict["penalty_temperature"])
+                penalty_temperature = F.softplus(self.log_penalty_temperature) + FLOAT_EPSILON
+                diff_bounds = next_action_samples - th.clamp(next_action_samples, -1, 1)
+                action_bound_costs = -th.norm(diff_bounds, dim=-1)
+                penalty_weights, penalty_temperature_loss = weights_and_temperature_loss(
+                    action_bound_costs, self.epsilon_penalty, penalty_temperature
+                )
+                weights += penalty_weights
+                temperature_loss += penalty_temperature_loss
+
+            # Decompose the policy into fixed-mean and fixed-std distributions
+            fixed_std_distribution = Independent(Normal(distributions.mean, target_distributions.stddev), -1)
+            fixed_mean_distribution = Independent(Normal(target_distributions.mean, distributions.stddev), -1)
+
+            # Compute the decomposed policy losses
+            policy_mean_losses = (fixed_std_distribution.base_dist.log_prob(next_action_samples).sum(dim=-1) * weights).sum(
+                dim=0
+            )
+            policy_mean_loss = -(policy_mean_losses).mean()
+            policy_std_losses = (fixed_mean_distribution.base_dist.log_prob(next_action_samples).sum(dim=-1) * weights).sum(
+                dim=0
+            )
+            policy_std_loss = -policy_std_losses.mean()
+
+            # Compute the decomposed KL between the target and online policies
+            if self.per_dim_constraining:
+                kl_mean = th.distributions.kl.kl_divergence(target_distributions.base_dist, fixed_std_distribution.base_dist)
+                kl_std = th.distributions.kl.kl_divergence(target_distributions.base_dist, fixed_mean_distribution.base_dist)
+            else:
+                kl_mean = th.distributions.kl.kl_divergence(target_distributions, fixed_std_distribution)
+                kl_std = th.distributions.kl.kl_divergence(target_distributions, fixed_mean_distribution)
+
+            # Compute the alpha-weighted KL-penalty and dual losses
+            kl_mean_loss, alpha_mean_loss = parametric_kl_and_dual_losses(kl_mean, alpha_mean, self.epsilon_mean)
+            kl_std_loss, alpha_std_loss = parametric_kl_and_dual_losses(kl_std, alpha_std, self.epsilon_std)
+
+            # Combine losses
+            policy_loss = policy_mean_loss + policy_std_loss
+            kl_loss = kl_mean_loss + kl_std_loss
+            dual_loss = alpha_mean_loss + alpha_std_loss + temperature_loss
+            actor_loss = policy_loss + kl_loss + dual_loss
+
+            # Compute the critic loss
+            critic_values = self.critic.q1_forward(replay_data.observations, replay_data.actions)
+            critic_loss = F.mse_loss(critic_values, returns)
+
+            actor_loss.backward()
+            critic_loss.backward()
+            if self.gradient_clip > 0:
+                th.nn.utils.clip_grad_norm_(self.actor.parameters(), self.gradient_clip)
+                th.nn.utils.clip_grad_norm_(self.dual_variables, self.gradient_clip)
+                th.nn.utils.clip_grad_norm_(self.critic.parameters(), self.gradient_clip)
+            self.actor.optimizer.step()
+            self.dual_optimizer.step()
+            self.critic.optimizer.step()
+
+            # Save losses for logging
+            critic_losses.append(critic_loss.item())
+            actor_losses.append(actor_loss.item())
+            policy_losses.append(policy_loss.item())
+            kl_losses.append(kl_loss.item())
+            dual_losses.append(dual_loss.item())
+
+            # Save dual variables for logging
+            logged_temperatures.append(temperature.mean().item())
+            logged_alpha_means.append(alpha_mean.mean().item())
+            logged_alpha_stds.append(alpha_std.mean().item())
+            if self.action_penalization:
+                logged_penalties.append(penalty_temperature.mean().item())
 
         self.logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
         self.logger.record("train/critic_loss", np.mean(critic_losses))
+        self.logger.record("train/actor_loss", np.mean(actor_losses))
         self.logger.record("train/policy_loss", np.mean(policy_losses))
         self.logger.record("train/kl_loss", np.mean(kl_losses))
         self.logger.record("train/dual_loss", np.mean(dual_losses))
-        self.logger.record("train/actor_loss", np.mean(actor_losses))
         self.logger.record("train/temperature", np.mean(logged_temperatures))
         self.logger.record("train/alpha_mean", np.mean(logged_alpha_means))
         self.logger.record("train/alpha_std", np.mean(logged_alpha_stds))

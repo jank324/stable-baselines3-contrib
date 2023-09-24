@@ -186,7 +186,7 @@ class MPOPolicy(BasePolicy):
         normalize_images: bool = True,
         optimizer_class: Type[th.optim.Optimizer] = th.optim.Adam,
         optimizer_kwargs: Optional[Dict[str, Any]] = None,
-        n_critics: int = 2,  # TODO: Figure out how many MPO uses -> I think it's 1
+        n_critics: int = 1,  # TODO: Figure out how many MPO uses -> I think it's 1
         share_features_extractor: bool = False,
     ):
         super().__init__(
@@ -357,7 +357,7 @@ class CnnPolicy(MPOPolicy):
         normalize_images: bool = True,
         optimizer_class: Type[th.optim.Optimizer] = th.optim.Adam,
         optimizer_kwargs: Optional[Dict[str, Any]] = None,
-        n_critics: int = 2,  # TODO: Figure out how many MPO uses -> I think it's 1
+        n_critics: int = 1,  # TODO: Figure out how many MPO uses -> I think it's 1
         share_features_extractor: bool = False,
     ):
         super().__init__(
@@ -411,7 +411,7 @@ class MultiInputPolicy(MPOPolicy):
         normalize_images: bool = True,
         optimizer_class: Type[th.optim.Optimizer] = th.optim.Adam,
         optimizer_kwargs: Optional[Dict[str, Any]] = None,
-        n_critics: int = 2,  # TODO: Figure out how many MPO uses -> I think it's 1
+        n_critics: int = 1,  # TODO: Figure out how many MPO uses -> I think it's 1
         share_features_extractor: bool = False,
     ):
         super().__init__(

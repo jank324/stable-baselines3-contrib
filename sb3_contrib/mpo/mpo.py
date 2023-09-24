@@ -9,10 +9,15 @@ from stable_baselines3.common.off_policy_algorithm import OffPolicyAlgorithm
 from stable_baselines3.common.policies import ActorCriticCnnPolicy, ActorCriticPolicy, BasePolicy, MultiInputActorCriticPolicy
 from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback, Schedule
 from stable_baselines3.common.utils import get_parameters_by_name
+from torch import nn
+from torch.distributions import Independent, Normal
+from torch.nn import functional as F
 
 from sb3_contrib.mpo.policies import CnnPolicy, MlpPolicy, MultiInputPolicy
 
 SelfMPO = TypeVar("SelfMPO", bound="MPO")
+
+FLOAT_EPSILON = 1e-8
 
 
 class MPO(OffPolicyAlgorithm):
@@ -83,6 +88,8 @@ class MPO(OffPolicyAlgorithm):
         train_freq: Union[int, Tuple[int, str]] = (1, "episode"),
         gradient_steps: int = -1,
         action_noise: Optional[ActionNoise] = None,
+        dual_optimizer_class: Type[th.optim.Optimizer] = th.optim.Adam,
+        dual_optimizer_kwargs: Optional[Dict[str, Any]] = None,
         replay_buffer_class: Optional[Type[ReplayBuffer]] = None,
         replay_buffer_kwargs: Optional[Dict[str, Any]] = None,
         optimize_memory_usage: bool = False,
@@ -123,23 +130,39 @@ class MPO(OffPolicyAlgorithm):
             support_multi_env=True,
         )
 
-        # TODO
-
         self.policy_delay = policy_delay
         self.target_noise_clip = target_noise_clip
         self.target_policy_noise = target_policy_noise
+        self.dual_optimizer_class = dual_optimizer_class
+        self.dual_optimizer_kwargs = dual_optimizer_kwargs or {"lr": 1e-2}  # Adam with lr=1e-2 is default in Acme
 
         if _init_setup_model:
             self._setup_model()
 
     def _setup_model(self) -> None:
         super()._setup_model()
+        # TODO: This setup as copied from TD3 is a little odd
+        self._setup_dual_variables_and_optimizer()
 
-        # TODO: ?
+    def _setup_dual_variables_and_optimizer(self) -> None:
+        """
+        Setup dual variables and optimiser.
+        """
+        shape = [self.action_space.shape[0]] if self.per_dim_constraining else [1]
+
+        self.log_temperature = nn.Parameter(th.as_tensor([self.initial_log_temperature], dtype=th.float32))
+        self.log_alpha_mean = nn.Parameter(th.full(shape, self.initial_log_alpha_mean, dtype=th.float32))
+        self.log_alpha_std = nn.Parameter(th.full(shape, self.initial_log_alpha_std, dtype=th.float32))
+
+        self.dual_variables = [self.log_temperature, self.log_alpha_mean, self.log_alpha_std]
+
+        if self.action_penalization:
+            self.log_penalty_temperature = nn.Parameter(th.as_tensor([self.initial_log_temperature], dtype=th.float32))
+            self.dual_variables.append(self.log_penalty_temperature)
+
+        self.dual_optimizer = self.dual_optimizer_class(self.dual_variables, **self.dual_optimizer_kwargs)
 
     def train(self, gradient_steps: int, batch_size: int = 100) -> None:
-        # TODO Main todo
-
         # Switch to train mode (this affects batch norm / dropout)
         self.policy.set_training_mode(True)
 
@@ -147,7 +170,11 @@ class MPO(OffPolicyAlgorithm):
         self._update_learning_rate(self.policy.optimizer)
 
         policy_losses, kl_losses, dual_losses, losses = [], [], [], []
-        for _ in range(gradient_steps):  # TODO: Are there multiple gradient steps in Acme? (I think there are higher up)
+        logged_temperatures, logged_alpha_means, logged_alpha_stds = [], [], []
+        if self.action_penalization:
+            logged_penalties = []
+
+        for _ in range(gradient_steps):
             self._n_updates += 1
             # Sample replay buffer
             replay_data = self.replay_buffer.sample(batch_size, env=self._vec_normalize_env)  # type: ignore[union-attr]
@@ -230,33 +257,36 @@ class MPO(OffPolicyAlgorithm):
                 # next_actions, next_action_values, next_log_prob, next_action_distribution = self.policy_target.forward(
                 #     replay_data.next_observations
                 # )
-                next_action_distributions = self.actor_target.get_distribution(replay_data.next_observations)
-                next_action_samples = next_action_distributions.sample(self.num_samples)
+                target_distributions = self.actor_target.predict_action_distribution(
+                    replay_data.next_observations
+                ).proba_distribution
+                next_action_samples = target_distributions.sample((self.num_samples,))
 
-                tiled_observations = updaters.tile(observations, self.num_samples)
-                flat_observations = updaters.merge_first_two_dims(tiled_observations)
-                flat_actions = updaters.merge_first_two_dims(actions)
-                values = self.model.target_critic(flat_observations, flat_actions)
-                values = values.view(self.num_samples, -1)
+                tiled_observations = replay_data.observations.tile(self.num_samples)
+                flat_observations = tiled_observations.reshape(self.num_samples, -1)  # Merge first two dims
+                flat_actions = next_action_samples.reshape(self.num_samples, -1)  # Merge first two dims
+                values = self.critic_target.q1_forward(
+                    flat_observations, flat_actions
+                )  # Use q1_forward because MPO defaults to using only one critic
+                values = values.reshape(self.num_samples, -1)
 
-                assert isinstance(target_distributions, th.distributions.normal.Normal)
-                target_distributions = independent_normals(target_distributions)
+                target_distributions = Independent(target_distributions, -1)
 
-            self.actor_optimizer.zero_grad()
+            self.actor.optimizer.zero_grad()
             self.dual_optimizer.zero_grad()
 
-            distributions = self.model.actor(observations)
-            distributions = independent_normals(distributions)
+            distributions = self.actor.predict_action_distribution(replay_data.observations).proba_distribution
+            distributions = Independent(distributions, -1)
 
-            temperature = th.nn.functional.softplus(self.log_temperature) + FLOAT_EPSILON
-            alpha_mean = th.nn.functional.softplus(self.log_alpha_mean) + FLOAT_EPSILON
-            alpha_std = th.nn.functional.softplus(self.log_alpha_std) + FLOAT_EPSILON
+            temperature = F.softplus(self.log_temperature) + FLOAT_EPSILON
+            alpha_mean = F.softplus(self.log_alpha_mean) + FLOAT_EPSILON
+            alpha_std = F.softplus(self.log_alpha_std) + FLOAT_EPSILON
             weights, temperature_loss = weights_and_temperature_loss(values, self.epsilon, temperature)
 
             # Action penalization is quadratic beyond [-1, 1].
             if self.action_penalization:
-                penalty_temperature = th.nn.functional.softplus(self.log_penalty_temperature) + FLOAT_EPSILON
-                diff_bounds = actions - th.clamp(actions, -1, 1)
+                penalty_temperature = F.softplus(self.log_penalty_temperature) + FLOAT_EPSILON
+                diff_bounds = next_action_samples - th.clamp(next_action_samples, -1, 1)
                 action_bound_costs = -th.norm(diff_bounds, dim=-1)
                 penalty_weights, penalty_temperature_loss = weights_and_temperature_loss(
                     action_bound_costs, self.epsilon_penalty, penalty_temperature
@@ -264,14 +294,18 @@ class MPO(OffPolicyAlgorithm):
                 weights += penalty_weights
                 temperature_loss += penalty_temperature_loss
 
-            # Decompose the policy into fixed-mean and fixed-std distributions.
-            fixed_std_distribution = independent_normals(distributions.base_dist, target_distributions.base_dist)
-            fixed_mean_distribution = independent_normals(target_distributions.base_dist, distributions.base_dist)
+            # Decompose the policy into fixed-mean and fixed-std distributions
+            fixed_std_distribution = Independent(Normal(distributions.mean, target_distributions.stddev), -1)
+            fixed_mean_distribution = Independent(Normal(target_distributions.mean, distributions.stddev), -1)
 
             # Compute the decomposed policy losses.
-            policy_mean_losses = (fixed_std_distribution.base_dist.log_prob(actions).sum(dim=-1) * weights).sum(dim=0)
+            policy_mean_losses = (fixed_std_distribution.base_dist.log_prob(next_action_samples).sum(dim=-1) * weights).sum(
+                dim=0
+            )
             policy_mean_loss = -(policy_mean_losses).mean()
-            policy_std_losses = (fixed_mean_distribution.base_dist.log_prob(actions).sum(dim=-1) * weights).sum(dim=0)
+            policy_std_losses = (fixed_mean_distribution.base_dist.log_prob(next_action_samples).sum(dim=-1) * weights).sum(
+                dim=0
+            )
             policy_std_loss = -policy_std_losses.mean()
 
             # Compute the decomposed KL between the target and online policies.
@@ -294,28 +328,36 @@ class MPO(OffPolicyAlgorithm):
 
             loss.backward()
             if self.gradient_clip > 0:
-                th.nn.utils.clip_grad_norm_(self.actor_variables, self.gradient_clip)
+                th.nn.utils.clip_grad_norm_(self.actor.parameters(), self.gradient_clip)
                 th.nn.utils.clip_grad_norm_(self.dual_variables, self.gradient_clip)
-            self.actor_optimizer.step()
+            self.actor.optimizer.step()
             self.dual_optimizer.step()
 
-            dual_variables = dict(
-                temperature=temperature.detach(), alpha_mean=alpha_mean.detach(), alpha_std=alpha_std.detach()
-            )
-            if self.action_penalization:
-                dual_variables["penalty_temperature"] = penalty_temperature.detach()
+            # TODO: Critic update
 
-            # Save losses
+            # Save losses for logging
             policy_losses.append(policy_loss.item())
             kl_losses.append(kl_loss.item())
             dual_losses.append(dual_loss.item())
             losses.append(loss.item())
+
+            # Save dual variables for logging
+            logged_temperatures.append(temperature.mean().item())
+            logged_alpha_means.append(alpha_mean.mean().item())
+            logged_alpha_stds.append(alpha_std.mean().item())
+            if self.action_penalization:
+                logged_penalties.append(penalty_temperature.mean().item())
 
         self.logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
         self.logger.record("train/policy_loss", np.mean(policy_losses))
         self.logger.record("train/kl_loss", np.mean(kl_losses))
         self.logger.record("train/dual_loss", np.mean(dual_losses))
         self.logger.record("train/loss", np.mean(losses))
+        self.logger.record("train/temperature", np.mean(logged_temperatures))
+        self.logger.record("train/alpha_mean", np.mean(logged_alpha_means))
+        self.logger.record("train/alpha_std", np.mean(logged_alpha_stds))
+        if self.action_penalization:
+            self.logger.record("train/penalty_temperature", np.mean(logged_penalties))
 
     def learn(
         self: SelfMPO,
@@ -343,3 +385,33 @@ class MPO(OffPolicyAlgorithm):
         # TODO ?
         state_dicts = ["policy", "actor.optimizer", "critic.optimizer"]
         return state_dicts, []
+
+
+def weights_and_temperature_loss(q_values: th.Tensor, epsilon: float, temperature: th.Tensor) -> Tuple[th.Tensor, th.Tensor]:
+    """
+    Computes weights for loss computation and the temperature loss.
+
+    Following implementation in: https://github.com/fabiopardo/tonic/blob/master/tonic/torch/updaters/actors.py
+    """
+    tempered_q_values = q_values.detach() / temperature
+    weights = F.softmax(tempered_q_values, dim=0)
+    weights = weights.detach()
+
+    # Temperature loss (dual of the E-step).
+    q_log_sum_exp = th.logsumexp(tempered_q_values, dim=0)
+    num_actions = th.as_tensor(q_values.shape[0], dtype=th.float32)
+    log_num_actions = th.log(num_actions)
+    loss = epsilon + (q_log_sum_exp).mean() - log_num_actions
+    loss = temperature * loss
+
+    return weights, loss
+
+
+def parametric_kl_and_dual_losses(kl: th.Tensor, alpha: th.Tensor, epsilon: float) -> Tuple[th.Tensor, th.Tensor]:
+    """
+    Computes the alpha-weighted KL-penalty and dual losses.
+    """
+    kl_mean = kl.mean(dim=0)
+    kl_loss = (alpha.detach() * kl_mean).sum()
+    alpha_loss = (alpha * (epsilon - kl_mean.detach())).sum()
+    return kl_loss, alpha_loss

@@ -12,9 +12,9 @@ from stable_baselines3.common.envs import FakeImageEnv, IdentityEnv, IdentityEnv
 from stable_baselines3.common.utils import get_device
 from stable_baselines3.common.vec_env import DummyVecEnv
 
-from sb3_contrib import ARS, QRDQN, TQC, TRPO
+from sb3_contrib import ARS, MPO, QRDQN, TQC, TRPO
 
-MODEL_LIST = [ARS, QRDQN, TQC, TRPO]
+MODEL_LIST = [ARS, QRDQN, TQC, TRPO, MPO]
 
 
 def select_env(model_class: BaseAlgorithm) -> gym.Env:
@@ -273,7 +273,7 @@ def test_save_load_policy(tmp_path, model_class, policy_str):
     if policy_str == "MlpPolicy":
         env = select_env(model_class)
     else:
-        if model_class in [TQC, QRDQN]:
+        if model_class in [TQC, QRDQN, MPO]:
             # Avoid memory error when using replay buffer
             # Reduce the size of the features
             kwargs = dict(

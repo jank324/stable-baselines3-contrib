@@ -142,8 +142,6 @@ class Actor(BasePolicy):
         return actions
 
     def _predict(self, observation: th.Tensor, deterministic: bool = False) -> th.Tensor:
-        # Note: the deterministic deterministic parameter is ignored in the case of TD3.
-        #   Predictions are always deterministic.
         return self(observation, deterministic=deterministic)
 
 
@@ -301,9 +299,7 @@ class MPOPolicy(BasePolicy):
         return self._predict(observation, deterministic=deterministic)
 
     def _predict(self, observation: th.Tensor, deterministic: bool = False) -> th.Tensor:
-        # Note: the deterministic deterministic parameter is ignored in the case of TD3.
-        #   Predictions are always deterministic.
-        return self.actor(observation)
+        return self.actor(observation, deterministic=deterministic)
 
     def set_training_mode(self, mode: bool) -> None:
         """

@@ -9,7 +9,7 @@ from stable_baselines3.common.envs import SimpleMultiObsEnv
 from stable_baselines3.common.evaluation import evaluate_policy
 from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack, VecNormalize
 
-from sb3_contrib import QRDQN, TQC, TRPO
+from sb3_contrib import MPO, QRDQN, TQC, TRPO
 
 
 class DummyDictEnv(gym.Env):
@@ -89,7 +89,7 @@ def test_env(use_discrete_actions, channel_last, nested_dict_obs, vec_only):
         check_env(DummyDictEnv(use_discrete_actions, channel_last, nested_dict_obs, vec_only))
 
 
-@pytest.mark.parametrize("model_class", [QRDQN, TQC, TRPO])
+@pytest.mark.parametrize("model_class", [QRDQN, TQC, TRPO, MPO])
 def test_consistency(model_class):
     """
     Make sure that dict obs with vector only vs using flatten obs is equivalent.
@@ -134,14 +134,14 @@ def test_consistency(model_class):
     assert np.allclose(action_1, action_2)
 
 
-@pytest.mark.parametrize("model_class", [QRDQN, TQC, TRPO])
+@pytest.mark.parametrize("model_class", [QRDQN, TQC, TRPO, MPO])
 @pytest.mark.parametrize("channel_last", [False, True])
 def test_dict_spaces(model_class, channel_last):
     """
     Additional tests to check observation space support
     with mixed observation.
     """
-    use_discrete_actions = model_class not in [TQC]
+    use_discrete_actions = model_class not in [TQC, MPO]
     env = DummyDictEnv(use_discrete_actions=use_discrete_actions, channel_last=channel_last)
     env = gym.wrappers.TimeLimit(env, 100)
 
@@ -164,11 +164,12 @@ def test_dict_spaces(model_class, channel_last):
             policy_kwargs=dict(
                 net_arch=[32],
                 features_extractor_kwargs=dict(cnn_output_dim=32),
-                n_quantiles=20,
             ),
             train_freq=8,
             gradient_steps=1,
         )
+        if model_class in {QRDQN, TQC}:
+            kwargs["policy_kwargs"]["n_quantiles"] = 20
         if model_class == QRDQN:
             kwargs["learning_starts"] = 0
 
@@ -179,14 +180,14 @@ def test_dict_spaces(model_class, channel_last):
     evaluate_policy(model, env, n_eval_episodes=5, warn=False)
 
 
-@pytest.mark.parametrize("model_class", [QRDQN, TQC, TRPO])
+@pytest.mark.parametrize("model_class", [QRDQN, TQC, TRPO, MPO])
 @pytest.mark.parametrize("channel_last", [False, True])
 def test_dict_vec_framestack(model_class, channel_last):
     """
     Additional tests to check observation space support
     for Dictionary spaces and VecEnvWrapper using MultiInputPolicy.
     """
-    use_discrete_actions = model_class not in [TQC]
+    use_discrete_actions = model_class not in [TQC, MPO]
     channels_order = {"vec": None, "img": "last" if channel_last else "first"}
     env = DummyVecEnv(
         [lambda: SimpleMultiObsEnv(random_start=True, discrete_actions=use_discrete_actions, channel_last=channel_last)]
@@ -213,11 +214,12 @@ def test_dict_vec_framestack(model_class, channel_last):
             policy_kwargs=dict(
                 net_arch=[32],
                 features_extractor_kwargs=dict(cnn_output_dim=32),
-                n_quantiles=20,
             ),
             train_freq=8,
             gradient_steps=1,
         )
+        if model_class in {QRDQN, TQC}:
+            kwargs["policy_kwargs"]["n_quantiles"] = 20
         if model_class == QRDQN:
             kwargs["learning_starts"] = 0
 
@@ -228,7 +230,7 @@ def test_dict_vec_framestack(model_class, channel_last):
     evaluate_policy(model, env, n_eval_episodes=5, warn=False)
 
 
-@pytest.mark.parametrize("model_class", [QRDQN, TQC, TRPO])
+@pytest.mark.parametrize("model_class", [QRDQN, TQC, TRPO, MPO])
 def test_vec_normalize(model_class):
     """
     Additional tests to check observation space support

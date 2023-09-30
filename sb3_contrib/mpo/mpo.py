@@ -214,8 +214,12 @@ class MPO(OffPolicyAlgorithm):
                 ).distribution
                 next_action_samples = target_distributions.sample((self.num_samples,))
 
-                tiled_observations = replay_data.observations.tile((self.num_samples, 1, 1))
-                tiled_next_observations = replay_data.next_observations.tile((self.num_samples, 1, 1))
+                tiled_observations = replay_data.observations.tile(
+                    self.num_samples, *(1 for _ in range(replay_data.observations.dim()))
+                )
+                tiled_next_observations = replay_data.next_observations.tile(
+                    self.num_samples, *(1 for _ in range(replay_data.next_observations.dim()))
+                )
 
                 # Flatten sample and batch dimensions for critic evaluations
                 flat_observations = merge_first_two_dims(tiled_observations)
@@ -376,7 +380,7 @@ def merge_first_two_dims(original: th.Tensor) -> th.Tensor:
     Merges the first two dimensions of a tensor, e.g. a tensor of shape (a, b, c, d) will be reshaped to (a*b, c, d).
     """
     merged_dim_size = original.shape[0] * original.shape[1]
-    merged_tensor = original.view(merged_dim_size, -1)
+    merged_tensor = original.view(merged_dim_size, *original.shape[2:])
 
     return merged_tensor
 

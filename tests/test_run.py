@@ -3,7 +3,7 @@ import pytest
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import VecNormalize
 
-from sb3_contrib import ARS, QRDQN, TQC, TRPO, MaskablePPO
+from sb3_contrib import ARS, MPO, QRDQN, TQC, TRPO, MaskablePPO
 from sb3_contrib.common.envs import InvalidActionEnvDiscrete
 from sb3_contrib.common.vec_env import AsyncEval
 
@@ -160,3 +160,8 @@ def test_ep_buffers_stats_window_size(algo, stats_window_size):
     model.learn(total_timesteps=10)
     assert model.ep_info_buffer.maxlen == stats_window_size
     assert model.ep_success_buffer.maxlen == stats_window_size
+
+
+def test_mpo():
+    model = MPO("MlpPolicy", "Pendulum-v1", learning_starts=100, seed=0, policy_kwargs=dict(net_arch=[16]), verbose=1)
+    model.learn(total_timesteps=500)

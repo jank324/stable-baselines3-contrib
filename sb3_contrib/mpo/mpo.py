@@ -176,7 +176,7 @@ class MPO(OffPolicyAlgorithm):
         """
         Setup dual variables and optimiser.
         """
-        shape = [self.action_space.shape[0]] if self.per_dim_constraining else [1]
+        shape = [self.action_space.shape[0]] if self.per_dim_constraining else [1]  # type: ignore
 
         self.log_temperature = nn.Parameter(th.as_tensor([self.initial_log_temperature], dtype=th.float32))
         self.log_alpha_mean = nn.Parameter(th.full(shape, self.initial_log_alpha_mean, dtype=th.float32))

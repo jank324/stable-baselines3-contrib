@@ -65,7 +65,7 @@ class Actor(BasePolicy):
 
         # Create main MLP
         previous_layer_dim = features_dim
-        mlp_layers = []
+        mlp_layers: list[nn.Module] = []
         for current_layer_dim in net_arch:
             mlp_layers.append(nn.Linear(previous_layer_dim, current_layer_dim))
             mlp_layers.append(self.activation_fn())

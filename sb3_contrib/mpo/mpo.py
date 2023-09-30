@@ -352,7 +352,7 @@ class MPO(OffPolicyAlgorithm):
         )
 
     def _excluded_save_params(self) -> List[str]:
-        return super()._excluded_save_params() + [
+        return super()._excluded_save_params() + [  # noqa: RUF005
             "actor",
             "critic",
             "actor_target",
@@ -363,7 +363,7 @@ class MPO(OffPolicyAlgorithm):
             "log_alpha_std",
             "log_penalty_temperature",
             "dual_optimizer",
-        ]  # noqa: RUF005
+        ]
 
     def _get_torch_save_params(self) -> Tuple[List[str], List[str]]:
         state_dicts = ["policy", "actor.optimizer", "critic.optimizer", "dual_optimizer"]

@@ -89,11 +89,8 @@ class MPO(OffPolicyAlgorithm):
         batch_size: int = 100,
         tau: float = 0.005,
         gamma: float = 0.99,
-        train_freq: Union[int, Tuple[int, str]] = (
-            1,
-            "episode",
-        ),  # TODO: Tonic step_between_batches=50
-        gradient_steps: int = -1,  # TODO: Tonic batch_iterations=50
+        train_freq: Union[int, Tuple[int, str]] = (1, "episode"),  # Tonic step_between_batches=50
+        gradient_steps: int = -1,  # Tonic batch_iterations=50
         dual_optimizer_class: Type[th.optim.Optimizer] = th.optim.Adam,
         dual_optimizer_kwargs: Optional[Dict[str, Any]] = None,
         per_dim_constraining: bool = True,

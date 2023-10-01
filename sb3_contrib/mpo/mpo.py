@@ -89,7 +89,10 @@ class MPO(OffPolicyAlgorithm):
         batch_size: int = 100,
         tau: float = 0.005,
         gamma: float = 0.99,
-        train_freq: Union[int, Tuple[int, str]] = (1, "episode"),  # TODO: Tonic step_between_batches=50
+        train_freq: Union[int, Tuple[int, str]] = (
+            1,
+            "episode",
+        ),  # TODO: Tonic step_between_batches=50
         gradient_steps: int = -1,  # TODO: Tonic batch_iterations=50
         dual_optimizer_class: Type[th.optim.Optimizer] = th.optim.Adam,
         dual_optimizer_kwargs: Optional[Dict[str, Any]] = None,
@@ -178,14 +181,18 @@ class MPO(OffPolicyAlgorithm):
         """
         shape = [self.action_space.shape[0]] if self.per_dim_constraining else [1]  # type: ignore
 
-        self.log_temperature = nn.Parameter(th.as_tensor([self.initial_log_temperature], dtype=th.float32))
+        self.log_temperature = nn.Parameter(th.as_tensor(self.initial_log_temperature, dtype=th.float32))
         self.log_alpha_mean = nn.Parameter(th.full(shape, self.initial_log_alpha_mean, dtype=th.float32))
         self.log_alpha_std = nn.Parameter(th.full(shape, self.initial_log_alpha_std, dtype=th.float32))
 
-        self.dual_variables = [self.log_temperature, self.log_alpha_mean, self.log_alpha_std]
+        self.dual_variables = [
+            self.log_temperature,
+            self.log_alpha_mean,
+            self.log_alpha_std,
+        ]
 
         if self.action_penalization:
-            self.log_penalty_temperature = nn.Parameter(th.as_tensor([self.initial_log_temperature], dtype=th.float32))
+            self.log_penalty_temperature = nn.Parameter(th.as_tensor(self.initial_log_temperature, dtype=th.float32))
             self.dual_variables.append(self.log_penalty_temperature)
 
         self.dual_optimizer = self.dual_optimizer_class(self.dual_variables, **self.dual_optimizer_kwargs)
@@ -215,10 +222,12 @@ class MPO(OffPolicyAlgorithm):
                 next_action_samples = target_distributions.sample((self.num_samples,))
 
                 tiled_observations = replay_data.observations.tile(
-                    self.num_samples, *(1 for _ in range(replay_data.observations.dim()))
+                    self.num_samples,
+                    *(1 for _ in range(replay_data.observations.dim())),
                 )
                 tiled_next_observations = replay_data.next_observations.tile(
-                    self.num_samples, *(1 for _ in range(replay_data.next_observations.dim()))
+                    self.num_samples,
+                    *(1 for _ in range(replay_data.next_observations.dim())),
                 )
 
                 # Flatten sample and batch dimensions for critic evaluations
@@ -231,7 +240,7 @@ class MPO(OffPolicyAlgorithm):
                 flat_next_values = self.critic_target.q1_forward(flat_next_observations, flat_actions)
 
                 # Restore sample and batch dimensions
-                values = flat_values.view(self.num_samples, -1)
+                values = flat_values.view(self.num_samples, -1, 1)
                 next_values = flat_next_values.view(self.num_samples, -1, 1)
 
                 target_distributions = Independent(target_distributions, -1)
@@ -254,7 +263,7 @@ class MPO(OffPolicyAlgorithm):
             if self.action_penalization:
                 penalty_temperature = F.softplus(self.log_penalty_temperature) + FLOAT_EPSILON
                 diff_bounds = next_action_samples - th.clamp(next_action_samples, -1, 1)
-                action_bound_costs = -th.norm(diff_bounds, dim=-1)
+                action_bound_costs = -th.norm(diff_bounds, dim=-1).unsqueeze(-1)
                 penalty_weights, penalty_temperature_loss = weights_and_temperature_loss(
                     action_bound_costs, self.epsilon_penalty, penalty_temperature
                 )
@@ -266,13 +275,13 @@ class MPO(OffPolicyAlgorithm):
             fixed_mean_distribution = Independent(Normal(target_distributions.mean, distributions.stddev), -1)
 
             # Compute the decomposed policy losses
-            policy_mean_losses = (fixed_std_distribution.base_dist.log_prob(next_action_samples).sum(dim=-1) * weights).sum(
-                dim=0
-            )
+            policy_mean_losses = (
+                fixed_std_distribution.base_dist.log_prob(next_action_samples).sum(dim=-1).unsqueeze(-1) * weights
+            ).sum(dim=0)
             policy_mean_loss = -(policy_mean_losses).mean()
-            policy_std_losses = (fixed_mean_distribution.base_dist.log_prob(next_action_samples).sum(dim=-1) * weights).sum(
-                dim=0
-            )
+            policy_std_losses = (
+                fixed_mean_distribution.base_dist.log_prob(next_action_samples).sum(dim=-1).unsqueeze(-1) * weights
+            ).sum(dim=0)
             policy_std_loss = -policy_std_losses.mean()
 
             # Compute the decomposed KL between the target and online policies
@@ -336,6 +345,8 @@ class MPO(OffPolicyAlgorithm):
         self.logger.record("train/alpha_std", np.mean(logged_alpha_stds))
         if self.action_penalization:
             self.logger.record("train/penalty_temperature", np.mean(logged_penalties))
+        if hasattr(self.actor, "log_std"):
+            self.logger.record("train/std", th.exp(self.actor.log_std).mean().item())
 
     def learn(
         self: SelfMPO,

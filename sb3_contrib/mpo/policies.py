@@ -186,6 +186,7 @@ class MPOPolicy(BasePolicy):
         optimizer_class: Type[th.optim.Optimizer] = th.optim.Adam,
         optimizer_kwargs: Optional[Dict[str, Any]] = None,
         n_critics: int = 1,
+        log_std_init: float = 0.0,
         share_features_extractor: bool = False,
     ):
         super().__init__(
@@ -218,6 +219,11 @@ class MPOPolicy(BasePolicy):
             "normalize_images": normalize_images,
         }
         self.actor_kwargs = self.net_args.copy()
+        self.actor_kwargs.update(
+            {
+                "log_std_init": log_std_init,
+            }
+        )
         self.critic_kwargs = self.net_args.copy()
         self.critic_kwargs.update(
             {

@@ -201,8 +201,10 @@ class MPO(OffPolicyAlgorithm):
         # Update learning rate according to lr schedule
         self._update_learning_rate([self.actor.optimizer, self.critic.optimizer, self.dual_optimizer])
 
-        critic_losses = []
-        policy_losses, kl_losses, dual_losses, actor_losses = [], [], [], []
+        logged_actor_losses, logged_critic_losses = [], []
+        logged_policy_losses, logged_policy_mean_losses, logged_policy_std_losses = [], [], []
+        logged_kl_losses, logged_kl_mean_losses, logged_kl_std_losses = [], [], []
+        logged_dual_losses, logged_alpha_mean_losses, logged_alpha_std_losses, logged_temperature_losses = [], [], [], []
         logged_temperatures, logged_alpha_means, logged_alpha_stds = [], [], []
         if self.action_penalization:
             logged_penalties = []
@@ -318,11 +320,18 @@ class MPO(OffPolicyAlgorithm):
             polyak_update(self.actor.parameters(), self.actor_target.parameters(), self.tau)
 
             # Save losses for logging
-            critic_losses.append(critic_loss.item())
-            actor_losses.append(actor_loss.item())
-            policy_losses.append(policy_loss.item())
-            kl_losses.append(kl_loss.item())
-            dual_losses.append(dual_loss.item())
+            logged_critic_losses.append(critic_loss.item())
+            logged_actor_losses.append(actor_loss.item())
+            logged_policy_losses.append(policy_loss.item())
+            logged_policy_mean_losses.append(policy_mean_loss.item())
+            logged_policy_std_losses.append(policy_std_loss.item())
+            logged_kl_losses.append(kl_loss.item())
+            logged_kl_mean_losses.append(kl_mean_loss.item())
+            logged_kl_std_losses.append(kl_std_loss.item())
+            logged_dual_losses.append(dual_loss.item())
+            logged_alpha_mean_losses.append(alpha_mean_loss.item())
+            logged_alpha_std_losses.append(alpha_std_loss.item())
+            logged_temperature_losses.append(temperature_loss.item())
 
             # Save dual variables for logging
             logged_temperatures.append(temperature.mean().item())
@@ -332,11 +341,18 @@ class MPO(OffPolicyAlgorithm):
                 logged_penalties.append(penalty_temperature.mean().item())
 
         self.logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
-        self.logger.record("train/critic_loss", np.mean(critic_losses))
-        self.logger.record("train/actor_loss", np.mean(actor_losses))
-        self.logger.record("train/policy_loss", np.mean(policy_losses))
-        self.logger.record("train/kl_loss", np.mean(kl_losses))
-        self.logger.record("train/dual_loss", np.mean(dual_losses))
+        self.logger.record("train/critic_loss", np.mean(logged_critic_losses))
+        self.logger.record("train/actor_loss", np.mean(logged_actor_losses))
+        self.logger.record("train/policy_loss", np.mean(logged_policy_losses))
+        self.logger.record("train/policy_mean_loss", np.mean(logged_policy_mean_losses))
+        self.logger.record("train/policy_std_loss", np.mean(logged_policy_std_losses))
+        self.logger.record("train/kl_loss", np.mean(logged_kl_losses))
+        self.logger.record("train/kl_mean_loss", np.mean(logged_kl_mean_losses))
+        self.logger.record("train/kl_std_loss", np.mean(logged_kl_std_losses))
+        self.logger.record("train/dual_loss", np.mean(logged_dual_losses))
+        self.logger.record("train/alpha_mean_loss", np.mean(logged_alpha_mean_losses))
+        self.logger.record("train/alpha_std_loss", np.mean(logged_alpha_std_losses))
+        self.logger.record("train/temperature_loss", np.mean(logged_temperature_losses))
         self.logger.record("train/temperature", np.mean(logged_temperatures))
         self.logger.record("train/alpha_mean", np.mean(logged_alpha_means))
         self.logger.record("train/alpha_std", np.mean(logged_alpha_stds))

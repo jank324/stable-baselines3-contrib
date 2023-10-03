@@ -97,6 +97,7 @@ class MPO(OffPolicyAlgorithm):
         initial_log_temperature: float = 1.0,
         initial_log_alpha_mean: float = 1.0,
         initial_log_alpha_std: float = 10.0,
+        min_log_dual: float = -18.0,
         action_penalization: bool = True,
         num_samples: int = 20,
         epsilon: float = 0.1,
@@ -149,6 +150,7 @@ class MPO(OffPolicyAlgorithm):
         self.initial_log_temperature = initial_log_temperature
         self.initial_log_alpha_mean = initial_log_alpha_mean
         self.initial_log_alpha_std = initial_log_alpha_std
+        self.min_log_dual = th.as_tensor(min_log_dual, dtype=th.float32)
         self.action_penalization = action_penalization
         self.num_samples = num_samples
         self.epsilon = epsilon
@@ -215,6 +217,13 @@ class MPO(OffPolicyAlgorithm):
             replay_data = self.replay_buffer.sample(batch_size, env=self._vec_normalize_env)  # type: ignore[union-attr]
 
             with th.no_grad():
+                # Clamp dural variables
+                self.log_temperature.data.clamp_(self.min_log_dual, None)
+                self.log_alpha_mean.data.clamp_(self.min_log_dual, None)
+                self.log_alpha_std.data.clamp_(self.min_log_dual, None)
+                if self.action_penalization:
+                    self.log_penalty_temperature.data.clamp_(self.min_log_dual, None)
+
                 target_distributions = self.actor_target.predict_action_distribution(
                     replay_data.next_observations
                 ).distribution
